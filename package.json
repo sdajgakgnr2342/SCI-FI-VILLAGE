@@ -1,0 +1,20 @@
+{
+  "name": "sci-fi-village",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sci-Fi Village — voxel sandbox game (Vue3 + Node + Redis + MySQL)",
+  "scripts": {
+    "dev": "concurrently -n server,client -c cyan,magenta \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "dev:server": "npm run dev --prefix server",
+    "dev:client": "npm run dev --prefix client",
+    "build": "npm run build --prefix client && npm run build --prefix server",
+    "start": "npm run start --prefix server",
+    "db:init": "npm run db:init --prefix server"
+  },
+  "engines": {
+    "node": ">=16.20.2"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
