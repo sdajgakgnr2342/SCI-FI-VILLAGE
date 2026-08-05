@@ -12,8 +12,12 @@ function randomShareCode(len = 8) {
 
 function normalizeLayout(raw) {
   if (!raw || typeof raw !== 'object') return null;
-  // 接受 v1/v2；缺字段时仍落库，客户端再 normalize
-  if ((raw.version !== 1 && raw.version !== 2) || !raw.items || typeof raw.items !== 'object') {
+  // 接受 v1/v2/v3；缺字段时仍落库，客户端再 normalize
+  if (
+    (raw.version !== 1 && raw.version !== 2 && raw.version !== 3) ||
+    !raw.items ||
+    typeof raw.items !== 'object'
+  ) {
     return null;
   }
   return raw;

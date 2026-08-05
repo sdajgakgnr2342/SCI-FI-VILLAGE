@@ -1,18 +1,26 @@
 <template>
-  <div class="play">
+  <div class="play" :class="{ 'editing-controls': editingControls }">
     <div ref="viewport" class="viewport" />
 
     <div class="hud">
-      <!-- 左上：小队条（无人组队也显示自己） -->
-      <div v-if="squadHud.length" class="squad-strip">
-        <div v-for="m in squadHud" :key="m.userId" class="squad-row">
-          <i class="slot" :style="{ background: squadColor(m.slot) }">{{ m.slot }}</i>
-          <span class="sname">{{ shortName(m.name) }}</span>
-          <span v-if="m.online === false" class="offline">离线</span>
+      <!-- 左上：小队条 + 其下 15 秒广播条 -->
+      <div class="corner-left">
+        <div v-if="squadHud.length" class="squad-strip">
+          <div v-for="m in squadHud" :key="m.userId" class="squad-row">
+            <i class="slot" :style="{ background: squadColor(m.slot) }">{{ m.slot }}</i>
+            <span class="sname">{{ shortName(m.name) }}</span>
+            <span v-if="m.online === false" class="offline">离线</span>
+          </div>
+        </div>
+        <div class="broadcast-feed" aria-live="polite">
+          <div v-for="b in broadcastLive" :key="b.id" class="bcast">
+            <span class="b-who">{{ b.who }}</span><span class="b-sep">：</span
+            ><span class="b-txt">{{ b.text }}</span>
+          </div>
         </div>
       </div>
 
-      <!-- 右上：地图 + 下方设置 -->
+      <!-- 右上：地图 → 设置 → 标记 → 消息 -->
       <div class="corner-right">
         <MiniMap
           :my-x="mapMe.x"
@@ -21,6 +29,10 @@
           :my-user-id="auth.user?.id || 0"
           :peers="mapPeers"
           :squad-members="squadHud"
+          :terrain-sample="minimapTerrainSample"
+          :terrain-rev="mapTerrainRev"
+          :squad-marks="squadMarks"
+          @clear-my-mark="clearMySquadMark"
         />
         <button
           type="button"
@@ -36,6 +48,30 @@
             />
           </svg>
         </button>
+        <button
+          type="button"
+          class="icon-btn mark-btn"
+          :class="{ active: !!mySquadMark }"
+          title="点一下：标记准星位置；长按本按钮：清除自己的标记"
+          aria-label="标记"
+          @pointerdown.prevent.stop="onMarkPointerDown"
+          @pointerup.prevent.stop="onMarkPointerUp"
+          @pointercancel.prevent.stop="onMarkPointerCancel"
+          @pointerleave.prevent.stop="onMarkPointerCancel"
+        >
+          <svg class="gear" viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              fill="currentColor"
+              d="M12 2c-3.3 0-6 2.6-6 5.8 0 4.4 6 11.2 6 11.2s6-6.8 6-11.2C18 4.6 15.3 2 12 2zm0 8.2a2.4 2.4 0 1 1 0-4.8 2.4 2.4 0 0 1 0 4.8z"
+            />
+          </svg>
+        </button>
+        <SquadChat
+          :messages="chatMessages"
+          :my-user-id="auth.user?.id || 0"
+          @send="sendTeamChat"
+          @restore-mark="restoreMarkFromChat"
+        />
       </div>
 
       <div v-if="showWare" class="warehouse">
@@ -74,7 +110,7 @@
           </button>
         </div>
         <p class="ware-tip">
-          「模式」开关铲子/锤子 · 「操作/放置」执行 · 砍树采石会自动用斧
+          选中材料即建造 · 取消材料即挖砍采 · 「操作/放置」执行当前动作
         </p>
         <button type="button" class="ghost-close" @click="showWare = false">关闭</button>
       </div>
@@ -105,20 +141,10 @@
             <span class="id">{{ MATERIAL_LABEL[m] }}</span>
           </div>
         </div>
-        <p v-if="isTouch" class="mode-chip" :class="{ build: buildMode }">
-          <GameIcon class="mode-chip-icon" :name="modeIcon" :size="14" />
-          <span>{{
-            buildMode
-              ? selectedMat
-                ? `建造中 · 对准表面后点「放置」`
-                : `建造中 · 先点下方材料`
-              : `操作中 · 点「模式」可建造`
-          }}</span>
-        </p>
-        <p v-else class="tips">
+        <p v-if="!isTouch" class="tips">
           {{
             actionHint ||
-            `格子#${myCellNum} · Q${buildMode ? '建造' : '操作'} · E切换模式 · C蹲 · ${breakLabel}`
+            `格子#${myCellNum} · Q${buildMode ? '建造' : '操作'} · 点材料建造/再点取消 · C蹲 · ${breakLabel}`
           }}
         </p>
       </div>
@@ -191,8 +217,8 @@
       :style="hudWidgetStyle('actionRing')"
       @pointerdown.prevent.stop="onHudDown($event, 'actionRing')"
       @pointermove="onHudMove($event, 'actionRing')"
-      @pointerup="onHudUp($event, 'actionRing')"
-      @pointercancel="onHudUp($event, 'actionRing')"
+      @pointerup="onHudUp"
+      @pointercancel="onHudUp"
     >
       <svg viewBox="0 0 100 100" class="ring-svg">
         <circle class="ring-bg" cx="50" cy="50" r="42" />
@@ -221,8 +247,8 @@
       :style="hudWidgetStyle('targetHint')"
       @pointerdown.prevent.stop="onHudDown($event, 'targetHint')"
       @pointermove="onHudMove($event, 'targetHint')"
-      @pointerup="onHudUp($event, 'targetHint')"
-      @pointercancel="onHudUp($event, 'targetHint')"
+      @pointerup="onHudUp"
+      @pointercancel="onHudUp"
     >
       {{ targetName || '物体提示' }}
     </div>
@@ -242,15 +268,18 @@
       @look="onLook"
       @jump="onJump"
       @break="onBreak"
-      @place="onPlace"
       @crouch-toggle="onCrouchToggle"
       @warehouse="showWare = !showWare"
       @select="onControlSelect"
       @update-item="onControlDrag"
     />
 
-    <!-- 键位编辑条（可收起，避免挡拖动） -->
-    <div v-if="editingControls" class="ctrl-edit-bar" :class="{ collapsed: editBarCollapsed }">
+    <!-- 键位编辑条：顶栏，避免挡住右下操作键 -->
+    <div
+      v-if="editingControls"
+      class="ctrl-edit-bar"
+      :class="{ collapsed: editBarCollapsed }"
+    >
       <button
         type="button"
         class="ctrl-collapse"
@@ -309,7 +338,7 @@
         <p v-if="editMsg" class="ctrl-edit-msg">{{ editMsg }}</p>
       </template>
       <div v-else class="ctrl-edit-mini">
-        <span>{{ editSelected ? CONTROL_LABEL[editSelected] : '拖动布局' }}</span>
+        <span>{{ editSelected ? CONTROL_LABEL[editSelected] : `拖动 v${CONTROL_DRAG_VERSION}` }}</span>
         <button type="button" class="mini-save" @click="saveControls">保存</button>
         <button type="button" class="mini-cancel" @click="cancelControlEdit">取消</button>
       </div>
@@ -344,12 +373,23 @@ import {
 } from '@/game/inventory'
 import MobileControls from '@/components/MobileControls.vue'
 import MiniMap from '@/components/MiniMap.vue'
+import SquadChat from '@/components/SquadChat.vue'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
 import GameIcon from '@/components/GameIcon.vue'
 import { MATERIAL_ICON, type IconName } from '@/components/iconData'
 import { squadColor, type MapPeer, type SquadMember } from '@/game/squad'
+import {
+  SQUAD_MARK_TTL_MS,
+  type SquadMark,
+} from '@/game/squadMark'
+import {
+  CHAT_TEXT_MAX,
+  nextChatId,
+  pushChatItem,
+  type SquadChatItem,
+} from '@/game/squadChat'
 import { onLandscapeLayout } from '@/composables/landscapeBus'
-import { joinServer, leaveServer, nearbyPlayers, serverHeartbeat, queryServerBlocks, saveServerBlocks, type JoinResult } from '@/api/server'
+import { joinServer, leaveServer, nearbyPlayers, serverHeartbeat, queryServerBlocks, saveServerBlocks, saveServerInventory } from '@/api/server'
 import { fetchPartyMine } from '@/api/party'
 import {
   fetchControlLayout,
@@ -368,6 +408,7 @@ import {
   type ControlId,
   type ControlLayout,
 } from '@/game/controlLayout'
+import { CONTROL_DRAG_VERSION, beginDragSession, moveDragSession, type DragSession } from '@/game/controlDrag'
 import { clearLastServerId, setLastServerId } from '@/utils/lastServer'
 import { useAuthStore } from '@/stores/auth'
 import { cellNumberAt } from '@/game/mapGrid'
@@ -398,21 +439,309 @@ const playSettings = reactive<PlaySettings>(loadPlaySettings())
 const qualityOptions: QualityPreset[] = ['low', 'standard', 'high']
 const actionHint = ref('')
 const tool = ref<ToolId>('hand')
-/** 建造模式：开=锤子预览建造；关=铲子挖砍采 */
-const buildMode = ref(false)
-/** 当前选中的建造材料；再点同一项取消 */
+/** 当前选中的建造材料；有选中=建造，无选中=挖砍采 */
 const selectedMat = ref<MaterialId | null>(null)
+const buildMode = computed(() => selectedMat.value != null)
 const buildShape = ref<BuildShape>('single')
 const inv = reactive(createInventory())
-/** 操作键与建造状态键共用：关=铲子 dig，开=锤子 build */
+/** 操作键图标：有材料=锤子，无材料=铲子 */
 const modeIcon = computed<IconName>(() => (buildMode.value ? 'build' : 'dig'))
-const breakLabel = ref('挖')
+const breakLabel = computed(() => (buildMode.value ? '建' : '挖'))
 const targetName = ref('')
 const crouched = ref(false)
 const squadMembers = ref<SquadMember[]>([])
 const mapMe = reactive({ x: 0, z: 0, yaw: 0 })
 const mapPeers = ref<MapPeer[]>([])
 const myCellNum = computed(() => cellNumberAt(mapMe.x, mapMe.z))
+
+/** 小地图：按世界种子/覆盖层采样草坪、溪流、石、树等 */
+const mapTerrainRev = ref(0)
+function minimapTerrainSample(x: number, z: number) {
+  return engine?.getMinimapKind(x, z) ?? 'grass'
+}
+
+/** 小队战术标记（本地 + WS 同步） */
+const squadMarks = ref<SquadMark[]>([])
+const mySquadMark = computed(() => {
+  const selfId = auth.user?.id || 0
+  return squadMarks.value.find((m) => m.userId === selfId) || null
+})
+let markExpireTimer: number | undefined
+let markHoldTimer: number | undefined
+let markHoldCleared = false
+
+function mySquadSlot() {
+  const selfId = auth.user?.id || 0
+  const m = squadHud.value.find((s) => s.userId === selfId)
+  return m?.slot || 1
+}
+
+function syncSquadMarkVisuals() {
+  const now = Date.now()
+  squadMarks.value = squadMarks.value.filter((m) => m.expiresAt > now)
+  engine?.setSquadMarks(squadMarks.value)
+}
+
+function upsertSquadMark(mark: SquadMark) {
+  const list = squadMarks.value.filter((m) => m.userId !== mark.userId)
+  list.push(mark)
+  squadMarks.value = list
+  syncSquadMarkVisuals()
+  if (markExpireTimer) window.clearTimeout(markExpireTimer)
+  const soonest = Math.min(...squadMarks.value.map((m) => m.expiresAt - Date.now()))
+  if (Number.isFinite(soonest) && soonest > 0) {
+    markExpireTimer = window.setTimeout(() => syncSquadMarkVisuals(), soonest + 30)
+  }
+}
+
+function removeSquadMark(userId: number) {
+  squadMarks.value = squadMarks.value.filter((m) => m.userId !== userId)
+  syncSquadMarkVisuals()
+}
+
+function clearMySquadMark() {
+  const selfId = auth.user?.id || 0
+  if (!selfId) return
+  if (!squadMarks.value.some((m) => m.userId === selfId)) return
+  removeSquadMark(selfId)
+  presence?.sendSquadMark({ clear: true })
+  hint.value = '已清除标记'
+  window.setTimeout(() => {
+    if (hint.value === '已清除标记') hint.value = ''
+  }, 1200)
+}
+
+function onMarkPointerDown() {
+  markHoldCleared = false
+  if (markHoldTimer) window.clearTimeout(markHoldTimer)
+  markHoldTimer = window.setTimeout(() => {
+    markHoldCleared = true
+    clearMySquadMark()
+  }, 420)
+}
+
+function onMarkPointerUp() {
+  if (markHoldTimer) {
+    window.clearTimeout(markHoldTimer)
+    markHoldTimer = undefined
+  }
+  if (markHoldCleared) return
+  placeSquadMark()
+}
+
+function onMarkPointerCancel() {
+  if (markHoldTimer) {
+    window.clearTimeout(markHoldTimer)
+    markHoldTimer = undefined
+  }
+}
+
+/** 局内消息（队伍/系统），条数封顶，几乎不影响性能 */
+const chatMessages = ref<SquadChatItem[]>([])
+/** 左上广播：仅展示近 15 秒，历史仍在队伍消息列表 */
+const BROADCAST_TTL_MS = 15_000
+/** 广播条最多同时显示条数（越新越靠下，超出顶掉最旧） */
+const BROADCAST_MAX = 5
+const broadcastLive = ref<{ id: string; who: string; text: string }[]>([])
+const broadcastTimers = new Map<string, number>()
+
+function shortChatName(userId: number, fallback?: string | null) {
+  const m = squadHud.value.find((s) => s.userId === userId)
+  return shortName(m?.name || fallback || '队友')
+}
+
+function pushBroadcast(item: SquadChatItem) {
+  if (item.channel !== 'team' || item.kind !== 'chat') return
+  const selfId = auth.user?.id || 0
+  const who = item.userId === selfId ? '我' : item.name || '队友'
+  const id = item.id
+  const merged = [
+    ...broadcastLive.value.filter((b) => b.id !== id),
+    { id, who, text: item.text },
+  ]
+  if (merged.length > BROADCAST_MAX) {
+    const dropped = merged.slice(0, merged.length - BROADCAST_MAX)
+    for (const d of dropped) {
+      const t = broadcastTimers.get(d.id)
+      if (t) window.clearTimeout(t)
+      broadcastTimers.delete(d.id)
+    }
+  }
+  broadcastLive.value = merged.slice(-BROADCAST_MAX)
+  const prev = broadcastTimers.get(id)
+  if (prev) window.clearTimeout(prev)
+  const tid = window.setTimeout(() => {
+    broadcastTimers.delete(id)
+    broadcastLive.value = broadcastLive.value.filter((b) => b.id !== id)
+  }, BROADCAST_TTL_MS)
+  broadcastTimers.set(id, tid)
+}
+
+function appendChat(item: SquadChatItem) {
+  chatMessages.value = pushChatItem(chatMessages.value, item)
+  pushBroadcast(item)
+}
+
+function publishMarkSystem(mark: SquadMark, name?: string) {
+  const label = mark.label || '地点'
+  const who = name || shortChatName(mark.userId)
+  const item: SquadChatItem = {
+    id: nextChatId(),
+    channel: 'system',
+    kind: 'mark',
+    userId: mark.userId,
+    slot: mark.slot,
+    name: who,
+    text: `标记了${label}`,
+    ts: Date.now(),
+    mark: {
+      userId: mark.userId,
+      slot: mark.slot,
+      x: mark.x,
+      y: mark.y,
+      z: mark.z,
+      label: mark.label,
+    },
+  }
+  appendChat(item)
+  presence?.sendSquadChat({
+    channel: 'system',
+    kind: 'mark',
+    slot: mark.slot,
+    text: item.text,
+    mark: item.mark,
+  })
+}
+
+function placeSquadMark() {
+  const eng = engine
+  const selfId = auth.user?.id || 0
+  if (!eng || !selfId) return
+  const aim = eng.raycastMarkAim(64)
+  if (!aim) {
+    hint.value = '无法标记'
+    return
+  }
+  const slot = mySquadSlot()
+  const mark: SquadMark = {
+    userId: selfId,
+    slot,
+    x: aim.x,
+    y: aim.y,
+    z: aim.z,
+    label: aim.label,
+    expiresAt: Date.now() + SQUAD_MARK_TTL_MS,
+  }
+  upsertSquadMark(mark)
+  presence?.sendSquadMark({
+    slot: mark.slot,
+    x: mark.x,
+    y: mark.y,
+    z: mark.z,
+    label: mark.label,
+  })
+  publishMarkSystem(mark, shortName(auth.user?.displayName || auth.user?.username || '我'))
+  hint.value = `标记 · ${aim.label}`
+  window.setTimeout(() => {
+    if (hint.value.startsWith('标记')) hint.value = ''
+  }, 1600)
+}
+
+function sendTeamChat(text: string) {
+  const selfId = auth.user?.id || 0
+  const t = text.trim().slice(0, CHAT_TEXT_MAX)
+  if (!selfId || !t) return
+  const slot = mySquadSlot()
+  const name = shortName(auth.user?.displayName || auth.user?.username || '我')
+  appendChat({
+    id: nextChatId(),
+    channel: 'team',
+    kind: 'chat',
+    userId: selfId,
+    slot,
+    name,
+    text: t,
+    ts: Date.now(),
+  })
+  presence?.sendSquadChat({
+    channel: 'team',
+    kind: 'chat',
+    slot,
+    text: t,
+  })
+}
+
+function restoreMarkFromChat(item: SquadChatItem) {
+  const m = item.mark
+  if (!m) return
+  upsertSquadMark({
+    userId: m.userId,
+    slot: m.slot,
+    x: m.x,
+    y: m.y,
+    z: m.z,
+    label: m.label,
+    expiresAt: Date.now() + SQUAD_MARK_TTL_MS,
+  })
+  hint.value = '已重新显示标记'
+  window.setTimeout(() => {
+    if (hint.value === '已重新显示标记') hint.value = ''
+  }, 1200)
+}
+
+function ingestRemoteChat(msg: {
+  userId: number
+  username?: string
+  displayName?: string | null
+  channel?: 'team' | 'system'
+  kind?: string
+  slot?: number
+  text?: string
+  mark?: {
+    userId: number
+    slot: number
+    x: number
+    y: number
+    z: number
+    label?: string
+  }
+  ts?: number
+}) {
+  const selfId = auth.user?.id || 0
+  if (!msg.userId || msg.userId === selfId) return
+  const slot = msg.slot || squadHud.value.find((s) => s.userId === msg.userId)?.slot || 1
+  const name = shortChatName(msg.userId, msg.displayName || msg.username)
+  const kind = (msg.kind as SquadChatItem['kind']) || 'chat'
+  const channel = msg.channel === 'system' || kind === 'mark' || kind === 'wait' ? 'system' : 'team'
+  let text = (msg.text || '').trim()
+  if (kind === 'mark') {
+    const label = msg.mark?.label || '地点'
+    text = `标记了${label}`
+  } else if (kind === 'wait') {
+    text = '等一下'
+  }
+  // kind === 'chat'：text 保持纯内容
+  appendChat({
+    id: nextChatId(),
+    channel,
+    kind,
+    userId: msg.userId,
+    slot,
+    name,
+    text,
+    ts: msg.ts || Date.now(),
+    mark: msg.mark
+      ? {
+          userId: msg.mark.userId || msg.userId,
+          slot: msg.mark.slot || slot,
+          x: msg.mark.x,
+          y: msg.mark.y,
+          z: msg.mark.z,
+          label: msg.mark.label,
+        }
+      : undefined,
+  })
+}
 
 /** 左上小队：无组队也至少显示自己为 1 号；离线队友标 offline */
 const squadHud = computed(() => {
@@ -498,11 +827,89 @@ let serverId = 0
 let offLayout: (() => void) | undefined
 let hintTimer: number | undefined
 let presenceAcc = 0
+let mapPeerAcc = 0
 let lastBlockFetchKey = ''
 
 const BLOCK_FETCH_RADIUS = 112
-const BLOCK_FETCH_Y_MIN = 0
-const BLOCK_FETCH_Y_MAX = 48
+const BLOCK_FETCH_Y_MIN = -16
+const BLOCK_FETCH_Y_MAX = 96
+
+/** 待落库方块队列（按坐标去重，离开前必须冲刷） */
+const pendingBlocks = new Map<string, { x: number; y: number; z: number; blockId: string }>()
+let blockFlushTimer: number | undefined
+let invFlushTimer: number | undefined
+let invDirty = false
+
+function blockKey(b: { x: number; y: number; z: number }) {
+  return `${b.x},${b.y},${b.z}`
+}
+
+async function flushPendingBlocks() {
+  if (!serverId || !pendingBlocks.size) return
+  const batch = Array.from(pendingBlocks.values())
+  pendingBlocks.clear()
+  if (blockFlushTimer) {
+    window.clearTimeout(blockFlushTimer)
+    blockFlushTimer = undefined
+  }
+  // 分片上传，避免单次过大
+  for (let i = 0; i < batch.length; i += 200) {
+    const chunk = batch.slice(i, i + 200)
+    try {
+      await saveServerBlocks(serverId, chunk)
+    } catch (e) {
+      // 失败放回队列，下次再试
+      for (const b of chunk) pendingBlocks.set(blockKey(b), b)
+      console.warn('[blocks] save failed', e)
+      throw e
+    }
+  }
+}
+
+function scheduleBlockFlush() {
+  if (blockFlushTimer) return
+  blockFlushTimer = window.setTimeout(() => {
+    blockFlushTimer = undefined
+    flushPendingBlocks().catch(() => undefined)
+  }, 400)
+}
+
+async function flushInventory() {
+  if (!serverId || !invDirty) return
+  invDirty = false
+  if (invFlushTimer) {
+    window.clearTimeout(invFlushTimer)
+    invFlushTimer = undefined
+  }
+  try {
+    await saveServerInventory(serverId, { ...inv })
+  } catch (e) {
+    invDirty = true
+    console.warn('[inventory] save failed', e)
+  }
+}
+
+function scheduleInventoryFlush() {
+  invDirty = true
+  if (invFlushTimer) return
+  invFlushTimer = window.setTimeout(() => {
+    invFlushTimer = undefined
+    flushInventory().catch(() => undefined)
+  }, 800)
+}
+
+function applyInventoryFromServer(raw?: Record<string, number> | null) {
+  const base = createInventory()
+  if (raw && typeof raw === 'object') {
+    for (const k of Object.keys(base) as MaterialId[]) {
+      const n = Number(raw[k])
+      base[k] = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
+    }
+  }
+  for (const k of Object.keys(base) as MaterialId[]) {
+    inv[k] = base[k]
+  }
+}
 
 async function fetchBlocksAround(cx: number, cz: number, force = false) {
   if (!serverId || !engine) return
@@ -523,7 +930,10 @@ async function fetchBlocksAround(cx: number, cz: number, force = false) {
       minZ,
       maxZ,
     })
-    if (list?.length && engine) engine.applyRemoteBlocks(list)
+    if (list?.length && engine) {
+      engine.applyRemoteBlocks(list)
+      mapTerrainRev.value += 1
+    }
   } catch {
     // ignore transient
   }
@@ -533,8 +943,59 @@ function publishLocalBlocks(
   blocks: { x: number; y: number; z: number; blockId: string }[]
 ) {
   if (!serverId || !blocks.length) return
+  for (const b of blocks) {
+    pendingBlocks.set(blockKey(b), {
+      x: Math.floor(b.x),
+      y: Math.floor(b.y),
+      z: Math.floor(b.z),
+      blockId: b.blockId,
+    })
+  }
   presence?.sendBlocks(blocks)
-  saveServerBlocks(serverId, blocks).catch(() => undefined)
+  scheduleBlockFlush()
+}
+
+async function flushWorldStateBeforeLeave() {
+  // 先同步快照姿态（await 前 engine 可能被 dispose）
+  const pose = engine?.getPose()
+  const cam = engine?.camera.position
+  const finalState =
+    serverId && cam && pose
+      ? {
+          serverId,
+          x: cam.x,
+          y: cam.y,
+          z: cam.z,
+          yaw: pose.yaw,
+          pitch: pose.pitch,
+          inventory: { ...inv },
+        }
+      : null
+
+  try {
+    await flushPendingBlocks()
+  } catch {
+    /* best effort */
+  }
+  try {
+    await flushInventory()
+  } catch {
+    /* best effort */
+  }
+
+  if (finalState) {
+    try {
+      await leaveServer(finalState)
+      return
+    } catch {
+      /* fall through */
+    }
+  }
+  try {
+    await leaveServer()
+  } catch {
+    /* ignore */
+  }
 }
 
 const landscape = inject<{
@@ -576,23 +1037,18 @@ function syncEngineLoadout() {
   if (selectedMat.value) engine.buildMaterial = selectedMat.value
   engine.buildShape = buildShape.value
   engine.inventory = inv
-  engine.setBuildMode(buildMode.value)
-}
-
-function setBuildMode(on: boolean) {
-  buildMode.value = on
-  breakLabel.value = on ? '建' : '挖'
-  if (engine) {
-    engine.setBuildMode(on)
-    syncEngineLoadout()
-  }
+  engine.setBuildMode(selectedMat.value != null)
 }
 
 function selectMat(m: MaterialId) {
   selectedMat.value = selectedMat.value === m ? null : m
-  // 选材料时自动进入建造模式，取消材料时不强制退出
-  if (selectedMat.value) setBuildMode(true)
-  else syncEngineLoadout()
+  syncEngineLoadout()
+  if (engine) {
+    engine.lastActionHint = selectedMat.value
+      ? `建造 · ${MATERIAL_LABEL[selectedMat.value]} · 对准后点「放置」`
+      : '操作模式 · 点「操作」挖砍采'
+    flashHint()
+  }
 }
 function setTool(t: ToolId) {
   tool.value = t
@@ -626,15 +1082,10 @@ function onCrouchToggle() {
   engine?.queueCrouch()
   crouched.value = Boolean(engine?.crouching)
 }
-/** 操作键：跟随当前模式执行挖砍或建造 */
+/** 操作键：有材料则建造，否则挖砍采 */
 function onBreak() {
   if (!engine) return
-  if (buildMode.value) {
-    if (!selectedMat.value) {
-      engine.lastActionHint = '未选择材料'
-      flashHint()
-      return
-    }
+  if (selectedMat.value) {
     engine.beginBuild()
   } else {
     engine.beginHarvest()
@@ -642,18 +1093,6 @@ function onBreak() {
     syncEngineLoadout()
   }
   flashHint()
-}
-/** 建造状态键：切换挖/建模式 */
-function onPlace() {
-  setBuildMode(!buildMode.value)
-  if (engine) {
-    engine.lastActionHint = buildMode.value
-      ? selectedMat.value
-        ? '建造模式 · 对准表面后点「放置」'
-        : '建造模式 · 先选下方材料'
-      : '操作模式 · 点「操作」挖砍采'
-    flashHint()
-  }
 }
 
 function layoutUserId() {
@@ -665,7 +1104,7 @@ function applyLayout(layout: ControlLayout) {
   for (const id of CONTROL_IDS) {
     controlLayout.items[id] = { ...next.items[id] }
   }
-  controlLayout.version = 2
+  controlLayout.version = 3
   saveLayoutLocal(controlLayout, layoutUserId())
 }
 
@@ -673,12 +1112,14 @@ function enterControlEdit() {
   showSettings.value = false
   layoutBackup = JSON.parse(JSON.stringify(controlLayout)) as ControlLayout
   editingControls.value = true
-  editBarCollapsed.value = false
+  // 默认收起，避免挡键位；需要调大小/透明度再展开
+  editBarCollapsed.value = true
   editSelected.value = 'stick'
-  editMsg.value = '拖动控件调整位置'
+  editMsg.value = `拖动控件调整位置（引擎 v${CONTROL_DRAG_VERSION}）`
 }
 
 function cancelControlEdit() {
+  onHudUp()
   if (layoutBackup) applyLayout(layoutBackup)
   layoutBackup = null
   editingControls.value = false
@@ -706,7 +1147,7 @@ function onControlDrag(id: ControlId, patch: { x?: number; y?: number }) {
 
 const hudDragId = ref<number | null>(null)
 const hudDragging = ref<ControlId | null>(null)
-const hudDragStart = reactive({ px: 0, py: 0, ix: 0, iy: 0 })
+const hudDragSession = ref<DragSession | null>(null)
 
 function hudWidgetStyle(id: 'targetHint' | 'actionRing') {
   const it = controlLayout.items[id]
@@ -719,53 +1160,88 @@ function hudWidgetStyle(id: 'targetHint' | 'actionRing') {
     height: id === 'actionRing' ? `${size}px` : 'auto',
     fontSize: id === 'targetHint' ? `${Math.max(0.62, 0.78 * it.size)}rem` : undefined,
     opacity: it.opacity,
-    pointerEvents: editingControls.value ? 'auto' : 'none',
-    zIndex: editingControls.value ? 8 : 5,
+    pointerEvents: (editingControls.value ? 'auto' : 'none') as 'auto' | 'none',
+    zIndex: editingControls.value ? 45 : 5,
   }
 }
 
-function mapHudDelta(sx: number, sy: number) {
-  if (!landscapeForced.value) return { x: sx, y: sy }
-  return { x: sy, y: -sx }
+const hudWinOpts: AddEventListenerOptions = { capture: true, passive: false }
+
+function unbindHudWindowDrag() {
+  window.removeEventListener('pointermove', onHudWindowMove, hudWinOpts)
+  window.removeEventListener('pointerup', onHudWindowUp, hudWinOpts)
+  window.removeEventListener('pointercancel', onHudWindowUp, hudWinOpts)
+}
+
+function bindHudWindowDrag() {
+  unbindHudWindowDrag()
+  window.addEventListener('pointermove', onHudWindowMove, hudWinOpts)
+  window.addEventListener('pointerup', onHudWindowUp, hudWinOpts)
+  window.addEventListener('pointercancel', onHudWindowUp, hudWinOpts)
 }
 
 function onHudDown(e: PointerEvent, id: 'targetHint' | 'actionRing') {
   if (!editingControls.value) return
+  e.preventDefault()
+  e.stopPropagation()
   editSelected.value = id
   hudDragging.value = id
   hudDragId.value = e.pointerId
-  hudDragStart.px = e.clientX
-  hudDragStart.py = e.clientY
-  hudDragStart.ix = controlLayout.items[id].x
-  hudDragStart.iy = controlLayout.items[id].y
-  ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  const el = e.currentTarget as HTMLElement
+  const it = controlLayout.items[id]
+  const boxW = el.offsetWidth || (id === 'actionRing' ? 88 : 120) * it.size
+  const boxH = el.offsetHeight || (id === 'actionRing' ? 88 : 36) * it.size
+  hudDragSession.value = beginDragSession(
+    e.clientX,
+    e.clientY,
+    e.pointerId,
+    it.x,
+    it.y,
+    boxW,
+    boxH
+  )
+  bindHudWindowDrag()
+  try {
+    el.setPointerCapture(e.pointerId)
+  } catch {
+    /* ignore */
+  }
+}
+
+function applyHudDrag(e: PointerEvent) {
+  const id = hudDragging.value
+  const session = hudDragSession.value
+  if (!editingControls.value || !id || !session || e.pointerId !== session.pointerId) return
+  const next = moveDragSession(e.clientX, e.clientY, session)
+  controlLayout.items[id] = clampItem({
+    ...controlLayout.items[id],
+    x: next.x,
+    y: next.y,
+  })
+}
+
+function onHudWindowMove(e: PointerEvent) {
+  if (!hudDragging.value || e.pointerId !== hudDragId.value) return
+  e.preventDefault()
+  applyHudDrag(e)
+}
+
+function onHudWindowUp(e: PointerEvent) {
+  if (e.pointerId !== hudDragId.value) return
+  e.preventDefault()
+  onHudUp()
 }
 
 function onHudMove(e: PointerEvent, id: 'targetHint' | 'actionRing') {
   if (!editingControls.value || hudDragging.value !== id || e.pointerId !== hudDragId.value) return
-  const play = document.querySelector('.play') as HTMLElement | null
-  const pw = play?.clientWidth || window.innerWidth
-  const ph = play?.clientHeight || window.innerHeight
-  let dx = e.clientX - hudDragStart.px
-  let dy = e.clientY - hudDragStart.py
-  if (landscapeForced.value) {
-    const mapped = mapHudDelta(dx, dy)
-    dx = mapped.x
-    dy = mapped.y
-  }
-  const nx = hudDragStart.ix + (dx / pw) * 100
-  const ny = hudDragStart.iy - (dy / ph) * 100
-  controlLayout.items[id] = clampItem({
-    ...controlLayout.items[id],
-    x: nx,
-    y: ny,
-  })
+  applyHudDrag(e)
 }
 
-function onHudUp(e: PointerEvent, id: 'targetHint' | 'actionRing') {
-  if (hudDragging.value !== id || e.pointerId !== hudDragId.value) return
+function onHudUp(_e?: PointerEvent) {
   hudDragging.value = null
   hudDragId.value = null
+  hudDragSession.value = null
+  unbindHudWindowDrag()
 }
 
 function onSizeSlider(e: Event) {
@@ -784,6 +1260,7 @@ function onOpacitySlider(e: Event) {
 
 async function saveControls() {
   try {
+    onHudUp()
     const normalized = normalizeControlLayout(controlLayout)
     saveLayoutLocal(normalized, layoutUserId())
     const data = await saveControlLayout(normalized)
@@ -872,7 +1349,7 @@ async function goExitServer() {
   try {
     presence?.disconnect()
     presence = null
-    await leaveServer()
+    await flushWorldStateBeforeLeave()
   } catch {
     // 会话已失效也继续清本地
   }
@@ -891,8 +1368,6 @@ async function goExitServer() {
 
 function syncActionUi() {
   if (!engine) return
-  // 按钮文案跟模式走；具体目标名另显示在 target-hint
-  breakLabel.value = buildMode.value ? '建' : '挖'
   targetName.value = engine.targetName
   const busy = engine.actionKind != null && engine.actionRemainSec > 0
   actionRing.visible = busy
@@ -906,22 +1381,18 @@ function onPlayKeyDown(e: KeyboardEvent) {
   if (e.repeat || editingControls.value || showSettings.value) return
   const tag = (e.target as HTMLElement | null)?.tagName
   if (tag === 'INPUT' || tag === 'TEXTAREA') return
+  // E：取消材料（退出建造）
   if (e.code === 'KeyE') {
     e.preventDefault()
-    onPlace()
+    if (selectedMat.value) {
+      selectedMat.value = null
+      syncEngineLoadout()
+      if (engine) {
+        engine.lastActionHint = '已取消材料 · 操作模式'
+        flashHint()
+      }
+    }
   }
-}
-
-function readCachedJoin(): JoinResult | null {
-  try {
-    const raw = sessionStorage.getItem('sv_join')
-    if (!raw) return null
-    const data = JSON.parse(raw) as JoinResult
-    if (data?.server?.id === routeServerId.value) return data
-  } catch {
-    // ignore
-  }
-  return null
 }
 
 async function refreshNearby() {
@@ -982,28 +1453,35 @@ onMounted(async () => {
   try {
     // 先塞自己进小队条，避免接口返回前左上空白
     refreshPartyHud()
-    let data = readCachedJoin()
-    if (!data) {
-      data = await joinServer(routeServerId.value)
+    // 必须重新 join 建立 server_sessions，否则方块/仓库保存会 409 被静默吞掉
+    const data = await joinServer(routeServerId.value)
+    try {
       sessionStorage.setItem('sv_join', JSON.stringify(data))
+    } catch {
+      /* ignore */
     }
     serverId = data.server.id
     serverName.value = data.server.name
     setLastServerId(serverId)
+    applyInventoryFromServer(data.inventory)
 
     engine = new GameEngine(viewport.value, data.server.seed ?? 42, {
       antialias: playSettings.antialias,
       quality: playSettings.quality,
     })
+    mapTerrainRev.value += 1
     gameAudio = new GameAudio()
     gameAudio.setMuted(playSettings.muted)
     gameAudio.ensure()
     engine.audio = gameAudio
     engine.inventory = inv
     engine.onInventoryChange = () => {
-      /* reactive inv already updates */
+      scheduleInventoryFlush()
     }
-    engine.onBlocksChange = (blocks) => publishLocalBlocks(blocks)
+    engine.onBlocksChange = (blocks) => {
+      publishLocalBlocks(blocks)
+      mapTerrainRev.value += 1
+    }
     syncEngineLoadout()
 
     const sp = data.player
@@ -1022,25 +1500,31 @@ onMounted(async () => {
       fetchBlocksAround(pos.x, pos.z).catch(() => undefined)
     }
     engine.onFrame = (dt) => {
+      const eng = engine
+      if (!eng) return
       npc?.update(dt)
       remotes?.update(dt)
-      if (engine && engine.tool !== tool.value) tool.value = engine.tool
-      crouched.value = engine.crouching
-      mapMe.x = engine.camera.position.x
-      mapMe.z = engine.camera.position.z
-      mapMe.yaw = engine.getPose().yaw
-      mapPeers.value = remotes?.listMapPeers() || []
-      natureAudio?.setCreekDistance(engine.getCreekDistance(mapMe.x, mapMe.z))
+      if (eng.tool !== tool.value) tool.value = eng.tool
+      crouched.value = eng.crouching
+      mapMe.x = eng.camera.position.x
+      mapMe.z = eng.camera.position.z
+      mapMe.yaw = eng.getPose().yaw
+      mapPeerAcc += dt
+      if (mapPeerAcc > 0.25) {
+        mapPeerAcc = 0
+        mapPeers.value = remotes?.listMapPeers() || []
+      }
+      natureAudio?.setCreekDistance(eng.getCreekDistance(mapMe.x, mapMe.z))
       syncActionUi()
 
       presenceAcc += dt
-      if (presenceAcc > 0.08 && engine && presence) {
+      if (presenceAcc > 0.12 && presence) {
         presenceAcc = 0
-        const pose = engine.getPose()
+        const pose = eng.getPose()
         presence.sendPresence({
-          x: engine.camera.position.x,
-          y: engine.camera.position.y,
-          z: engine.camera.position.z,
+          x: eng.camera.position.x,
+          y: eng.camera.position.y,
+          z: eng.camera.position.z,
           yaw: pose.yaw,
           pitch: pose.pitch,
           action: pose.action,
@@ -1074,8 +1558,36 @@ onMounted(async () => {
       presence.connect(auth.token, serverId, {
         onPeers: (peers) => remotes?.syncList(peers),
         onPresence: (peer) => remotes?.upsert(peer),
-        onLeft: (uid) => remotes?.remove(uid),
-        onBlocks: (blocks) => engine?.applyRemoteBlocks(blocks),
+        onLeft: (uid) => {
+          remotes?.remove(uid)
+          removeSquadMark(uid)
+        },
+        onBlocks: (blocks) => {
+          engine?.applyRemoteBlocks(blocks)
+          if (blocks?.length) mapTerrainRev.value += 1
+        },
+        onSquadMark: (msg) => {
+          const uid = Number(msg.userId)
+          if (!uid || uid === auth.user?.id) return
+          if (msg.clear) {
+            removeSquadMark(uid)
+            return
+          }
+          const slot =
+            msg.slot ||
+            squadHud.value.find((s) => s.userId === uid)?.slot ||
+            1
+          upsertSquadMark({
+            userId: uid,
+            slot,
+            x: Number(msg.x) || 0,
+            y: Number(msg.y) || 0,
+            z: Number(msg.z) || 0,
+            label: msg.label || '',
+            expiresAt: Date.now() + SQUAD_MARK_TTL_MS,
+          })
+        },
+        onSquadChat: (msg) => ingestRemoteChat(msg),
       })
     }
 
@@ -1089,16 +1601,22 @@ onMounted(async () => {
     await loadCloudLayout()
     await enterFullscreen()
     if (!document.fullscreenElement) armFullscreenGesture()
-    nearbyTimer = window.setInterval(refreshNearby, 3000)
+    nearbyTimer = window.setInterval(() => {
+      if (document.hidden) return
+      refreshNearby()
+    }, 5000)
     refreshNearby()
     refreshPartyHud()
-    partyTimer = window.setInterval(refreshPartyHud, 8000)
+    partyTimer = window.setInterval(() => {
+      if (document.hidden) return
+      refreshPartyHud()
+    }, 10000)
     blockSyncTimer = window.setInterval(() => {
-      if (!engine) return
+      if (document.hidden || !engine) return
       fetchBlocksAround(engine.camera.position.x, engine.camera.position.z, true).catch(
         () => undefined
       )
-    }, 12000)
+    }, 16000)
   } catch (e) {
     error.value = e instanceof Error ? e.message : '进入失败'
     loading.value = false
@@ -1106,19 +1624,27 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  onHudUp()
   offLayout?.()
   window.removeEventListener('keydown', onPlayKeyDown)
   if (nearbyTimer) window.clearInterval(nearbyTimer)
   if (blockSyncTimer) window.clearInterval(blockSyncTimer)
   if (partyTimer) window.clearInterval(partyTimer)
   if (hintTimer) window.clearTimeout(hintTimer)
+  if (blockFlushTimer) window.clearTimeout(blockFlushTimer)
+  if (invFlushTimer) window.clearTimeout(invFlushTimer)
+  if (markExpireTimer) window.clearTimeout(markExpireTimer)
+  if (markHoldTimer) window.clearTimeout(markHoldTimer)
+  for (const tid of broadcastTimers.values()) window.clearTimeout(tid)
+  broadcastTimers.clear()
   natureAudio?.stop()
   natureAudio = null
   gameAudio?.dispose()
   gameAudio = null
   presence?.disconnect()
   presence = null
-  leaveServer().catch(() => undefined)
+  // 同步冲刷（不 await unmount，但尽量 fire-and-await via void）
+  void flushWorldStateBeforeLeave()
   sessionStorage.removeItem('sv_join')
   remotes?.dispose()
   remotes = null
@@ -1138,6 +1664,24 @@ onBeforeUnmount(() => {
   overflow: hidden;
   touch-action: none;
   overscroll-behavior: none;
+  /* 局内文案不可选中复制，减少误触 */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.play :deep(input),
+.play :deep(textarea) {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* 编辑键位时关掉会抢触摸的 HUD 交互层 */
+.play.editing-controls .hotbar,
+.play.editing-controls .corner-right,
+.play.editing-controls .warehouse,
+.play.editing-controls .desk-ware {
+  pointer-events: none !important;
 }
 
 .viewport {
@@ -1165,16 +1709,79 @@ onBeforeUnmount(() => {
     max(0.4rem, env(safe-area-inset-left));
 }
 
-/* 左上小队：半透明细条，尽量不挡视野 */
-.squad-strip {
+/* 左上：小队 + 广播 */
+.corner-left {
   pointer-events: none;
   position: absolute;
   left: max(0.4rem, env(safe-area-inset-left));
   top: max(0.4rem, env(safe-area-inset-top));
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
+  gap: 0.28rem;
+  max-width: min(240px, 46vw);
+  z-index: 9;
+}
+
+.squad-strip {
+  display: flex;
+  flex-direction: column;
   gap: 0.18rem;
-  max-width: 220px;
+  width: 100%;
+}
+
+.broadcast-feed {
+  /* 固定约 5 行高度，越新越靠下；透明背景 */
+  box-sizing: border-box;
+  width: 100%;
+  height: 6.9rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 0.18rem;
+  overflow: hidden;
+  background: transparent;
+  pointer-events: none;
+}
+
+.bcast {
+  flex-shrink: 0;
+  background: transparent;
+  color: rgba(245, 248, 247, 0.92);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75), 0 0 6px rgba(0, 0, 0, 0.35);
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.3;
+  word-break: break-word;
+  max-height: 1.3em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  animation: bcast-in 0.2s ease-out;
+}
+
+.b-who {
+  font-weight: 800;
+  color: rgba(240, 201, 58, 0.95);
+}
+
+.b-sep {
+  color: rgba(236, 242, 244, 0.55);
+}
+
+.b-txt {
+  color: rgba(245, 248, 247, 0.92);
+}
+
+@keyframes bcast-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .squad-row {
@@ -1253,6 +1860,12 @@ onBeforeUnmount(() => {
   width: 16px;
   height: 16px;
   display: block;
+}
+
+.icon-btn.mark-btn.active {
+  border-color: rgba(240, 201, 58, 0.65);
+  background: rgba(240, 201, 58, 0.22);
+  color: #ffe9a0;
 }
 
 .icon-btn:active {
@@ -1443,10 +2056,11 @@ onBeforeUnmount(() => {
   pointer-events: auto;
   position: absolute;
   left: 50%;
-  bottom: max(0.4rem, env(safe-area-inset-bottom));
+  top: max(0.4rem, env(safe-area-inset-top));
+  bottom: auto;
   transform: translateX(-50%);
-  z-index: 15;
-  width: min(420px, 94vw);
+  z-index: 30;
+  width: min(420px, 72%);
   background: rgba(12, 20, 26, 0.88);
   backdrop-filter: blur(8px);
   border: 1px solid rgba(255, 255, 255, 0.14);
@@ -1739,33 +2353,6 @@ onBeforeUnmount(() => {
   text-align: center;
   max-width: 90vw;
   opacity: 0.85;
-}
-
-.mode-chip {
-  pointer-events: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  margin: 0.15rem auto 0;
-  padding: 0.22rem 0.55rem;
-  border-radius: 999px;
-  max-width: min(92vw, 22rem);
-  font-size: 0.68rem;
-  font-weight: 600;
-  line-height: 1.25;
-  color: #ffe8d8;
-  background: rgba(40, 22, 14, 0.78);
-  border: 1px solid rgba(255, 170, 120, 0.45);
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
-}
-.mode-chip.build {
-  color: #d9ffe8;
-  background: rgba(12, 40, 28, 0.82);
-  border-color: rgba(120, 220, 160, 0.55);
-}
-.mode-chip-icon {
-  flex-shrink: 0;
-  opacity: 0.95;
 }
 
 .hotbar {

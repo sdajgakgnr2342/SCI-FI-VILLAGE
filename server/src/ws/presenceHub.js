@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const { query } = require('../db/mysql');
+const partyService = require('../services/partyService');
 
 /** 兴趣域格子边长（世界坐标） */
 const AOI_CELL = 48;
@@ -12,6 +13,10 @@ const SNAPSHOT_MS = 100;
 const MIN_PRESENCE_MS = 70;
 /** 动作变化时立即推给附近，提升手感 */
 const ACTION_PUSH = true;
+/** 小队标记最小间隔 */
+const MIN_MARK_MS = 180;
+/** 小队聊天最小间隔 */
+const MIN_CHAT_MS = 280;
 
 /**
  * 按 serverId 分房 + 网格 AOI + 定时 snapshot
@@ -154,6 +159,37 @@ function attachPresenceHub(wss) {
     }
   }
 
+  /** 小队标记：同服全图推给队友（无队则不广播） */
+  async function broadcastToPartyMates(socket, payload, serverIdOverride) {
+    const userId = socket.userId;
+    const serverId =
+      serverIdOverride != null ? serverIdOverride : socket.serverId;
+    if (!userId || serverId == null) return;
+    let mateIds = null;
+    try {
+      const party = await partyService.findPartyByUser(userId);
+      if (party) {
+        const members = await partyService.listMembers(party.id);
+        mateIds = new Set(members.map((m) => Number(m.userId)));
+      }
+    } catch {
+      mateIds = null;
+    }
+    if (!mateIds || mateIds.size <= 1) return;
+    const room = rooms.get(Number(serverId));
+    if (!room) return;
+    const raw = JSON.stringify(payload);
+    for (const peer of room) {
+      if (peer === socket || peer.readyState !== 1 || !peer.userId) continue;
+      if (!mateIds.has(Number(peer.userId))) continue;
+      try {
+        peer.send(raw);
+      } catch {
+        // ignore
+      }
+    }
+  }
+
   function leaveRoom(socket) {
     if (socket.serverId != null) {
       const serverId = Number(socket.serverId);
@@ -161,6 +197,19 @@ function attachPresenceHub(wss) {
       // 先通知兴趣域内的人
       if (socket.userId && socket.lastPresence) {
         broadcastAoi(socket, { type: 'peer_left', userId: socket.userId }, true);
+      }
+      // 清掉该人小队标记（传入 serverId，避免随后置空后异步查不到房）
+      if (socket.userId) {
+        broadcastToPartyMates(
+          socket,
+          {
+            type: 'squad_mark',
+            userId: socket.userId,
+            clear: true,
+            ts: Date.now(),
+          },
+          serverId
+        ).catch(() => undefined);
       }
       removeFromGrid(socket);
       if (room) {
@@ -310,12 +359,92 @@ function attachPresenceHub(wss) {
             }))
             .filter((b) => ![b.x, b.y, b.z].some((n) => Number.isNaN(n)));
           if (!blocks.length) return;
+          // 先入库再广播，保证同服重进/他人所见一致
+          try {
+            const serverService = require('../services/serverService');
+            await serverService.persistServerBlocks(
+              socket.serverId,
+              socket.userId,
+              blocks
+            );
+          } catch (err) {
+            console.warn('[ws] persist blocks failed:', err.message);
+          }
           broadcastBlocksNear(socket.serverId, blocks, socket, {
             type: 'blocks',
             userId: socket.userId,
             blocks,
             ts: Date.now(),
           });
+          return;
+        }
+
+        if (msg.type === 'squad_mark') {
+          const now = Date.now();
+          if (now - (socket.lastMarkAt || 0) < MIN_MARK_MS) return;
+          socket.lastMarkAt = now;
+          const clear = Boolean(msg.clear);
+          const payload = {
+            type: 'squad_mark',
+            userId: socket.userId,
+            clear,
+            slot: Math.max(1, Math.min(4, Math.floor(Number(msg.slot) || 1))),
+            x: Number(msg.x) || 0,
+            y: Number(msg.y) || 0,
+            z: Number(msg.z) || 0,
+            label: String(msg.label || '').slice(0, 24),
+            ts: now,
+          };
+          if (clear) {
+            delete payload.x;
+            delete payload.y;
+            delete payload.z;
+            delete payload.label;
+            delete payload.slot;
+          }
+          await broadcastToPartyMates(socket, payload);
+          return;
+        }
+
+        if (msg.type === 'squad_chat') {
+          const now = Date.now();
+          if (now - (socket.lastChatAt || 0) < MIN_CHAT_MS) return;
+          socket.lastChatAt = now;
+          const channel = msg.channel === 'system' ? 'system' : 'team';
+          const kind = ['chat', 'mark', 'wait'].includes(String(msg.kind))
+            ? String(msg.kind)
+            : 'chat';
+          const text = String(msg.text || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 20);
+          if (!text && kind === 'chat') return;
+          const payload = {
+            type: 'squad_chat',
+            userId: socket.userId,
+            username: socket.username,
+            displayName: socket.displayName,
+            channel,
+            kind,
+            slot: Math.max(1, Math.min(4, Math.floor(Number(msg.slot) || 1))),
+            text:
+              text ||
+              (kind === 'wait' ? '等一下' : kind === 'mark' ? '标记了一处地点' : ''),
+            ts: now,
+          };
+          if (msg.mark && typeof msg.mark === 'object') {
+            payload.mark = {
+              userId: socket.userId,
+              slot: payload.slot,
+              x: Number(msg.mark.x) || 0,
+              y: Number(msg.mark.y) || 0,
+              z: Number(msg.mark.z) || 0,
+              label: String(msg.mark.label || '').slice(0, 24),
+            };
+          }
+          // 回显自己 + 推队友（无队时至少自己能看见本地，客户端已先插入）
+          sendJson(socket, payload);
+          await broadcastToPartyMates(socket, payload);
           return;
         }
 

@@ -13,6 +13,7 @@ router.post('/heartbeat', serverController.heartbeat);
 router.get('/nearby', serverController.nearby);
 router.get('/blocks', serverController.queryBlocks);
 router.post('/blocks', serverController.saveBlocks);
+router.post('/inventory', serverController.saveInventory);
 router.get('/:id', serverController.detail);
 
 module.exports = router;

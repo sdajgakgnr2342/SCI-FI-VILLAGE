@@ -19,6 +19,34 @@ type Handler = {
   onPresence?: (peer: PeerPresence) => void
   onLeft?: (userId: number) => void
   onBlocks?: (blocks: { x: number; y: number; z: number; blockId: string }[]) => void
+  onSquadMark?: (mark: {
+    userId: number
+    clear?: boolean
+    slot?: number
+    x?: number
+    y?: number
+    z?: number
+    label?: string
+    ts?: number
+  }) => void
+  onSquadChat?: (msg: {
+    userId: number
+    username?: string
+    displayName?: string | null
+    channel?: 'team' | 'system'
+    kind?: string
+    slot?: number
+    text?: string
+    mark?: {
+      userId: number
+      slot: number
+      x: number
+      y: number
+      z: number
+      label?: string
+    }
+    ts?: number
+  }) => void
   onError?: (msg: string) => void
 }
 
@@ -70,6 +98,36 @@ export class PresenceClient {
         this.handlers.onBlocks?.(
           msg.blocks as { x: number; y: number; z: number; blockId: string }[]
         )
+      } else if (msg.type === 'squad_mark' && msg.userId != null) {
+        this.handlers.onSquadMark?.(msg as {
+          userId: number
+          clear?: boolean
+          slot?: number
+          x?: number
+          y?: number
+          z?: number
+          label?: string
+          ts?: number
+        })
+      } else if (msg.type === 'squad_chat' && msg.userId != null) {
+        this.handlers.onSquadChat?.(msg as {
+          userId: number
+          username?: string
+          displayName?: string | null
+          channel?: 'team' | 'system'
+          kind?: string
+          slot?: number
+          text?: string
+          mark?: {
+            userId: number
+            slot: number
+            x: number
+            y: number
+            z: number
+            label?: string
+          }
+          ts?: number
+        })
       } else if (msg.type === 'error') {
         this.handlers.onError?.(String(msg.message || 'ws error'))
       }
@@ -122,6 +180,48 @@ export class PresenceClient {
       JSON.stringify({
         type: 'blocks',
         blocks,
+      })
+    )
+  }
+
+  /** 小队标记：同服队友全图同步 */
+  sendSquadMark(data: {
+    clear?: boolean
+    slot?: number
+    x?: number
+    y?: number
+    z?: number
+    label?: string
+  }) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+    this.ws.send(
+      JSON.stringify({
+        type: 'squad_mark',
+        ...data,
+      })
+    )
+  }
+
+  /** 小队聊天 / 系统消息同步 */
+  sendSquadChat(data: {
+    channel: 'team' | 'system'
+    kind?: 'chat' | 'mark' | 'wait'
+    slot?: number
+    text: string
+    mark?: {
+      userId?: number
+      slot?: number
+      x: number
+      y: number
+      z: number
+      label?: string
+    }
+  }) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+    this.ws.send(
+      JSON.stringify({
+        type: 'squad_chat',
+        ...data,
       })
     )
   }

@@ -2,8 +2,17 @@ import * as THREE from 'three'
 
 export type SwingMode = 'none' | 'axe' | 'dig' | 'place'
 
+/** 静止时手臂相对竖直向前抬起的角度（开口向上的夹角） */
+const ARM_REST_X = -0.95
+/** 手臂略外展，与身体形成 V 形 */
+const ARM_REST_Z = 0.12
+/** 肩位：略靠前、略低，避免挡视野 */
+const ARM_POS_Y = -0.22
+const ARM_POS_Z = -0.28
+
 /**
  * 第一人称可见肢体：走路摆动 + 挥斧/挖掘动作
+ * 手臂短、向前抬起；斧柄末端嵌在右手手心。
  */
 export class FirstPersonBody {
   readonly root = new THREE.Group()
@@ -17,6 +26,7 @@ export class FirstPersonBody {
   private swingT = 0
   private swingMode: SwingMode = 'none'
   private crouchAmt = 0
+  private holdingAxe = false
 
   constructor() {
     this.root.name = 'fp-body'
@@ -34,10 +44,11 @@ export class FirstPersonBody {
     this.rightArm.add(this.axe)
     this.axe.visible = false
 
-    this.leftArm.position.set(-0.22, -0.3, -0.4)
-    this.rightArm.position.set(0.22, -0.3, -0.4)
-    this.leftArm.rotation.z = 0.1
-    this.rightArm.rotation.z = -0.1
+    // 肩：两侧略外、向前；抬起形成开口向上的夹角
+    this.leftArm.position.set(-0.2, ARM_POS_Y, ARM_POS_Z)
+    this.rightArm.position.set(0.2, ARM_POS_Y, ARM_POS_Z)
+    this.leftArm.rotation.set(ARM_REST_X, 0, ARM_REST_Z)
+    this.rightArm.rotation.set(ARM_REST_X, 0, -ARM_REST_Z)
 
     this.leftLeg.position.set(-0.12, -1.05, -0.22)
     this.rightLeg.position.set(0.12, -1.05, -0.22)
@@ -54,32 +65,39 @@ export class FirstPersonBody {
     })
   }
 
+  /**
+   * 斧组原点 = 握点（木柄末端）。
+   * 柄沿手的远端（局部 -Y）伸出，斧头在柄尖，嵌入手心像握住。
+   */
   private makeAxe() {
     const g = new THREE.Group()
     const handle = new THREE.Mesh(
-      new THREE.BoxGeometry(0.04, 0.42, 0.04),
+      new THREE.BoxGeometry(0.032, 0.4, 0.032),
       new THREE.MeshLambertMaterial({ color: 0x6b4423 })
     )
-    handle.position.set(0.02, -0.2, 0.08)
+    // 柄末端（握点）嵌在手心 y≈0；整段柄朝远端 -Y 伸出
+    handle.position.set(0.008, -0.17, 0.01)
     const head = new THREE.Mesh(
-      new THREE.BoxGeometry(0.18, 0.12, 0.05),
+      new THREE.BoxGeometry(0.19, 0.1, 0.048),
       new THREE.MeshLambertMaterial({ color: 0x9aa0a8 })
     )
-    head.position.set(0.08, -0.02, 0.08)
+    head.position.set(0.085, -0.36, 0.01)
     g.add(handle, head)
-    g.position.set(0, -0.22, 0.04)
+    // 锚到右手手心；刃略朝外前方
+    g.position.set(0.012, -0.2, 0.018)
+    g.rotation.set(-0.2, 0.65, 0.28)
     return g
   }
 
   private makeArm(skin: THREE.Material, cloth: THREE.Material, side: number) {
     const g = new THREE.Group()
-    // 偏细手臂，避免第一人称「胖手」挡视野
-    const upper = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.28, 0.07), cloth)
-    upper.position.set(0, -0.1, 0)
-    const hand = new THREE.Mesh(new THREE.BoxGeometry(0.065, 0.09, 0.08), skin)
-    hand.position.set(0, -0.28, 0.015)
+    // 短臂：袖 + 手，总长约 0.22
+    const upper = new THREE.Mesh(new THREE.BoxGeometry(0.065, 0.16, 0.065), cloth)
+    upper.position.set(0, -0.07, 0)
+    const hand = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.08, 0.075), skin)
+    hand.position.set(0, -0.2, 0.012)
     g.add(upper, hand)
-    g.position.x = side * 0.015
+    g.position.x = side * 0.01
     return g
   }
 
@@ -104,10 +122,11 @@ export class FirstPersonBody {
   playSwing(mode: SwingMode) {
     this.swingMode = mode
     this.swingT = 0
-    this.axe.visible = mode === 'axe'
+    if (mode === 'axe') this.axe.visible = true
   }
 
   setHoldingAxe(on: boolean) {
+    this.holdingAxe = on
     if (this.swingMode === 'none') this.axe.visible = on
   }
 
@@ -121,7 +140,6 @@ export class FirstPersonBody {
     pitch: number,
     crouching = false
   ) {
-    // 蹲/起身缓动（约 0.35s），避免肢体瞬变
     this.crouchAmt += ((crouching ? 1 : 0) - this.crouchAmt) * Math.min(1, dt * 4.2)
 
     const target = Math.min(1, Math.abs(moveStrength))
@@ -134,68 +152,78 @@ export class FirstPersonBody {
       this.phase *= 1 - Math.min(1, dt * 3)
     }
 
-    const amp = (sprint ? 0.55 : 0.34) * this.moveAmt
-    let swing = Math.sin(this.phase) * amp
-    const bob = Math.abs(Math.sin(this.phase)) * 0.03 * this.moveAmt
+    const amp = (sprint ? 0.48 : 0.32) * this.moveAmt
+    const swing = Math.sin(this.phase) * amp
+    const bob = Math.abs(Math.sin(this.phase)) * 0.025 * this.moveAmt
 
-    let rightX = -swing
-    let leftX = swing
-    let rightZ = sprint ? -0.48 : -0.42
-    let leftZ = rightZ
-    let rightY = -0.28 + bob * 0.85
-    let leftY = -0.28 + bob
+    // 基姿：向前抬起；走路时对侧摆动（像真人）
+    let rightX = ARM_REST_X - swing
+    let leftX = ARM_REST_X + swing
+    let rightZ = -ARM_REST_Z
+    let leftZ = ARM_REST_Z
+    let rightY = ARM_POS_Y + bob * 0.7
+    let leftY = ARM_POS_Y + bob
+    let rightYaw = 0
+    let leftYaw = 0
 
-    // 挥击动画
     if (this.swingMode !== 'none') {
       this.swingT += dt
-      const dur = this.swingMode === 'axe' ? 0.45 : 0.28
+      const dur = this.swingMode === 'axe' ? 0.52 : 0.32
       const t = Math.min(1, this.swingT / dur)
-      // 举起 → 劈下 → 回收
-      const raise = t < 0.35 ? t / 0.35 : 1
-      const strike = t < 0.35 ? 0 : t < 0.65 ? (t - 0.35) / 0.3 : 1
-      const recover = t < 0.65 ? 0 : (t - 0.65) / 0.35
+      // 后仰举起 → 向前劈下 → 回收
+      const raise = t < 0.28 ? t / 0.28 : 1
+      const strike = t < 0.28 ? 0 : t < 0.58 ? (t - 0.28) / 0.3 : 1
+      const recover = t < 0.58 ? 0 : (t - 0.58) / 0.42
 
       if (this.swingMode === 'axe') {
         this.axe.visible = true
-        rightX = -0.9 * raise + 1.35 * strike - 0.4 * recover
-        rightY = -0.18 - 0.08 * raise + 0.12 * strike
-        rightZ = -0.35 - 0.2 * raise - 0.25 * strike
-        leftX = 0.25 * strike
+        // 举过肩再劈下：抬起时更负（更抬），劈下冲过静止角
+        rightX =
+          ARM_REST_X -
+          0.85 * raise +
+          1.75 * strike -
+          0.55 * recover
+        rightY = ARM_POS_Y - 0.04 * raise + 0.06 * strike
+        rightZ = -ARM_REST_Z - 0.15 * raise - 0.35 * strike + 0.1 * recover
+        rightYaw = 0.25 * raise - 0.15 * strike
+        leftX = ARM_REST_X + 0.2 * strike
+        leftZ = ARM_REST_Z + 0.08 * strike
+      } else if (this.swingMode === 'dig') {
+        // 挖掘：向前下方戳挖
+        rightX = ARM_REST_X - 0.35 * raise + 0.95 * strike - 0.25 * recover
+        rightY = ARM_POS_Y + 0.04 * strike
+        rightZ = -ARM_REST_Z - 0.45 * strike
+        leftX = ARM_REST_X + 0.12
       } else {
-        // 挖/放：向前戳
-        rightX = -0.5 * raise + 0.85 * strike - 0.2 * recover
-        rightZ = -0.4 - 0.35 * strike
-        leftX = 0.15
+        // 放置：轻推
+        rightX = ARM_REST_X - 0.2 * raise + 0.55 * strike - 0.15 * recover
+        rightZ = -ARM_REST_Z - 0.3 * strike
+        leftX = ARM_REST_X + 0.08
       }
 
       if (t >= 1) {
         this.swingMode = 'none'
         this.swingT = 0
+        this.axe.visible = this.holdingAxe
       }
     }
 
-    this.leftArm.rotation.x = leftX
-    this.rightArm.rotation.x = rightX
+    this.leftArm.rotation.set(leftX, leftYaw, leftZ)
+    this.rightArm.rotation.set(rightX, rightYaw, rightZ)
     this.leftArm.position.y = leftY - this.crouchAmt * 0.06
     this.rightArm.position.y = rightY - this.crouchAmt * 0.06
-    this.leftArm.position.z = leftZ
-    this.rightArm.position.z = rightZ
+    this.leftArm.position.z = ARM_POS_Z
+    this.rightArm.position.z = ARM_POS_Z
 
     const lookDown = Math.max(0, -pitch)
     const legZ = -0.22 - lookDown * 0.15
     const legY = -1.05 - bob * 0.5 + this.crouchAmt * 0.22
-    this.leftLeg.rotation.x = -swing * 0.9 + this.crouchAmt * 0.55
-    this.rightLeg.rotation.x = swing * 0.9 + this.crouchAmt * 0.55
+    this.leftLeg.rotation.x = -swing * 0.95 + this.crouchAmt * 0.55
+    this.rightLeg.rotation.x = swing * 0.95 + this.crouchAmt * 0.55
     this.leftLeg.position.set(-0.12, legY, legZ)
     this.rightLeg.position.set(0.12, legY, legZ)
 
-    // 蹲下时镜头相对身体略降（root 下移）
     this.root.position.y = -this.crouchAmt * 0.35
-
-    if (this.moveAmt < 0.05 && this.swingMode === 'none') {
-      this.leftArm.rotation.x *= 0.9
-      this.rightArm.rotation.x *= 0.9
-    }
   }
 
   dispose() {

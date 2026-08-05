@@ -1,4 +1,5 @@
 import { apiGet, apiPost } from './http'
+import type { InventoryCounts } from '@/game/inventory'
 
 export interface GameServer {
   id: number
@@ -29,6 +30,7 @@ export interface NpcPolicy {
 export interface JoinResult {
   server: GameServer
   player: { x: number; y: number; z: number; yaw: number; pitch: number }
+  inventory?: InventoryCounts
   npcPolicy: NpcPolicy
 }
 
@@ -40,8 +42,16 @@ export function joinServer(serverId?: number) {
   return apiPost<JoinResult>('/servers/join', serverId ? { serverId } : {})
 }
 
-export function leaveServer() {
-  return apiPost<boolean>('/servers/leave', {})
+export function leaveServer(finalState?: {
+  serverId: number
+  x: number
+  y: number
+  z: number
+  yaw?: number
+  pitch?: number
+  inventory?: InventoryCounts
+}) {
+  return apiPost<boolean>('/servers/leave', finalState || {})
 }
 
 export function serverHeartbeat(data: {
@@ -87,9 +97,10 @@ export function queryServerBlocks(params: {
   return apiGet<ServerBlock[]>('/servers/blocks', params)
 }
 
-export function saveServerBlocks(
-  serverId: number,
-  blocks: ServerBlock[]
-) {
+export function saveServerBlocks(serverId: number, blocks: ServerBlock[]) {
   return apiPost<ServerBlock[]>('/servers/blocks', { serverId, blocks })
+}
+
+export function saveServerInventory(serverId: number, inventory: InventoryCounts) {
+  return apiPost<InventoryCounts>('/servers/inventory', { serverId, inventory })
 }

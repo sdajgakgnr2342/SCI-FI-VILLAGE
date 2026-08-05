@@ -347,6 +347,7 @@ async function joinServer(userId, preferredServerId, opts = {}) {
 
   await redis.del(`server:online:${server.id}`);
   const online = await countOnline(server.id);
+  const inventory = await getInventory(userId, server.id);
 
   return {
     server: {
@@ -361,6 +362,7 @@ async function joinServer(userId, preferredServerId, opts = {}) {
       yaw,
       pitch,
     },
+    inventory,
     npcPolicy: NPC_POLICY,
   };
 }
@@ -386,7 +388,44 @@ async function findOnlinePartyMate(userId, serverId) {
   }
 }
 
-async function leaveServer(userId) {
+async function leaveServer(userId, finalState = null) {
+  // 优先用客户端上报的最终姿态/仓库，避免只靠心跳漏存
+  if (
+    finalState &&
+    finalState.serverId &&
+    finalState.x != null &&
+    finalState.y != null &&
+    finalState.z != null
+  ) {
+    const sid = Number(finalState.serverId);
+    await upsertAnchor(userId, sid, {
+      x: Number(finalState.x),
+      y: Number(finalState.y),
+      z: Number(finalState.z),
+      yaw: Number(finalState.yaw) || 0,
+      pitch: Number(finalState.pitch) || 0,
+    });
+    // 同步会话行（若还在）便于 flush 兜底
+    await query(
+      `UPDATE server_sessions
+       SET last_seen_at = NOW(),
+           pos_x = ?, pos_y = ?, pos_z = ?, yaw = ?, pitch = ?
+       WHERE user_id = ? AND server_id = ?`,
+      [
+        Number(finalState.x),
+        Number(finalState.y),
+        Number(finalState.z),
+        Number(finalState.yaw) || 0,
+        Number(finalState.pitch) || 0,
+        userId,
+        sid,
+      ]
+    );
+    if (finalState.inventory && typeof finalState.inventory === 'object') {
+      await saveInventory(userId, sid, finalState.inventory);
+    }
+  }
+
   const row = await flushSessionToAnchor(userId);
   await query('DELETE FROM server_sessions WHERE user_id = ?', [userId]);
   if (row) await redis.del(`server:online:${row.serverId}`);
@@ -456,6 +495,20 @@ async function assertSession(userId, serverId) {
 
 async function setServerBlocks(serverId, userId, blocks) {
   await assertSession(userId, serverId);
+  return writeServerBlocks(serverId, userId, blocks);
+}
+
+/** WS 等路径：已鉴权时直接写入（会话失效时仍尽量落盘，保证地形不丢） */
+async function persistServerBlocks(serverId, userId, blocks) {
+  try {
+    await assertSession(userId, serverId);
+  } catch {
+    // 会话过期仍写入方块，避免挖坑丢失
+  }
+  return writeServerBlocks(serverId, userId, blocks);
+}
+
+async function writeServerBlocks(serverId, userId, blocks) {
   const saved = [];
   for (const b of blocks) {
     const x = Math.floor(Number(b.x));
@@ -472,6 +525,51 @@ async function setServerBlocks(serverId, userId, blocks) {
     saved.push({ x, y, z, blockId });
   }
   return saved;
+}
+
+const INV_KEYS = ['turf', 'stone', 'wood', 'dry_grass', 'dirt', 'sand'];
+
+function normalizeInventory(raw) {
+  const out = {};
+  for (const k of INV_KEYS) {
+    const n = Number(raw && raw[k]);
+    out[k] = Number.isFinite(n) && n > 0 ? Math.min(999999, Math.floor(n)) : 0;
+  }
+  return out;
+}
+
+async function getInventory(userId, serverId) {
+  try {
+    const rows = await query(
+      `SELECT inv_json AS invJson FROM server_player_inventories
+       WHERE user_id = ? AND server_id = ? LIMIT 1`,
+      [userId, serverId]
+    );
+    if (!rows.length) return normalizeInventory(null);
+    const raw =
+      typeof rows[0].invJson === 'string'
+        ? JSON.parse(rows[0].invJson)
+        : rows[0].invJson;
+    return normalizeInventory(raw);
+  } catch {
+    return normalizeInventory(null);
+  }
+}
+
+async function saveInventory(userId, serverId, inventory) {
+  const inv = normalizeInventory(inventory);
+  await query(
+    `INSERT INTO server_player_inventories (user_id, server_id, inv_json)
+     VALUES (?, ?, ?)
+     ON DUPLICATE KEY UPDATE inv_json = VALUES(inv_json)`,
+    [userId, serverId, JSON.stringify(inv)]
+  );
+  return inv;
+}
+
+async function saveInventoryForSession(userId, serverId, inventory) {
+  await assertSession(userId, serverId);
+  return saveInventory(userId, serverId, inventory);
 }
 
 async function getServerBlocksInRange(serverId, min, max) {
@@ -506,7 +604,11 @@ module.exports = {
   heartbeat,
   nearbyPlayers,
   setServerBlocks,
+  persistServerBlocks,
   getServerBlocksInRange,
+  getInventory,
+  saveInventory,
+  saveInventoryForSession,
   getNpcPolicy,
   purgeStaleSessions,
   countOnline,

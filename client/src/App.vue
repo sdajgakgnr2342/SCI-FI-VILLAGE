@@ -9,7 +9,7 @@
 
 <script setup lang="ts">
 import { provide, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useForceLandscape } from '@/composables/useForceLandscape'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
 
@@ -18,6 +18,8 @@ const landscape = useForceLandscape(shell)
 provide('landscape', landscape)
 
 const router = useRouter()
+const route = useRoute()
+landscape.setPortraitMode(Boolean(route.meta.portrait))
 const routeLoading = ref(false)
 const routeLoadingText = ref('加载中…')
 let navToken = 0
@@ -34,13 +36,15 @@ router.beforeEach((to, from) => {
   return true
 })
 
-router.afterEach(() => {
+router.afterEach((to) => {
   const token = navToken
   window.setTimeout(() => {
     if (token === navToken) routeLoading.value = false
   }, 180)
-  // 每个页面都尽量进全屏 / 锁横屏
-  void landscape.ensureFullscreen()
+  // 建模预览保持竖屏；其它页尽量全屏 / 锁横屏
+  landscape.setPortraitMode(Boolean(to.meta.portrait))
+  if (!to.meta.portrait) void landscape.ensureFullscreen()
+  else landscape.apply()
 })
 
 router.onError(() => {

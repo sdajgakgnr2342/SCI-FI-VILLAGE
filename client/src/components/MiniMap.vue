@@ -8,15 +8,27 @@
       @click.prevent.stop="openMap"
     >
       <div class="mini-frame">
-        <div class="map-surface" :style="miniSurfaceStyle">
+        <div class="map-surface">
+          <canvas ref="miniCanvasEl" class="terrain-canvas" aria-hidden="true" />
           <div class="map-grid" aria-hidden="true" />
-          <svg v-if="navLineMini" class="nav-svg" viewBox="0 0 100 100" preserveAspectRatio="none">
+          <svg class="nav-svg" viewBox="0 0 100 100" preserveAspectRatio="none">
             <line
+              v-if="navLineMini"
               :x1="navLineMini.x1"
               :y1="navLineMini.y1"
               :x2="navLineMini.x2"
               :y2="navLineMini.y2"
               class="nav-line"
+            />
+            <line
+              v-for="ln in squadLinesMini"
+              :key="'slm' + ln.userId"
+              :x1="ln.x1"
+              :y1="ln.y1"
+              :x2="ln.x2"
+              :y2="ln.y2"
+              class="squad-mark-line"
+              :style="{ stroke: ln.color }"
             />
           </svg>
           <div
@@ -26,6 +38,17 @@
           >
             <i class="wp-pin" aria-hidden="true" />
             <span class="wp-dist">{{ wpDistText }}</span>
+          </div>
+          <div
+            v-for="sm in squadPinsMini"
+            :key="'spm' + sm.userId"
+            class="squad-pin"
+            :class="{ edge: sm.onEdge }"
+            :style="{ left: `${sm.left}%`, top: `${sm.top}%`, '--pin': sm.color }"
+          >
+            <i class="sp-dot" />
+            <span class="sp-num">{{ sm.slot }}</span>
+            <span v-if="sm.isMe" class="sp-dist">{{ sm.distText }}</span>
           </div>
           <div
             v-for="m in markers"
@@ -52,10 +75,10 @@
       <div class="map-panel" role="dialog" aria-label="地图" @pointerdown.stop>
         <header class="map-head">
           <button
-            v-if="waypoint"
+            v-if="waypoint || mySquadMark"
             type="button"
             class="clear-wp"
-            @pointerdown.prevent.stop="clearWaypoint"
+            @pointerdown.prevent.stop="clearAllLocalMarks"
           >
             清除标记
           </button>
@@ -85,15 +108,27 @@
             @pointerup.prevent="onPointerUp"
             @pointercancel.prevent="onPointerUp"
           >
-            <div class="map-surface big" :style="bigSurfaceStyle">
+            <div class="map-surface big">
+              <canvas ref="bigCanvasEl" class="terrain-canvas" aria-hidden="true" />
               <div class="map-grid dense" :style="bigGridStyle" aria-hidden="true" />
-              <svg v-if="navLineBig" class="nav-svg" viewBox="0 0 100 100" preserveAspectRatio="none">
+              <svg class="nav-svg" viewBox="0 0 100 100" preserveAspectRatio="none">
                 <line
+                  v-if="navLineBig"
                   :x1="navLineBig.x1"
                   :y1="navLineBig.y1"
                   :x2="navLineBig.x2"
                   :y2="navLineBig.y2"
                   class="nav-line"
+                />
+                <line
+                  v-for="ln in squadLinesBig"
+                  :key="'slb' + ln.userId"
+                  :x1="ln.x1"
+                  :y1="ln.y1"
+                  :x2="ln.x2"
+                  :y2="ln.y2"
+                  class="squad-mark-line"
+                  :style="{ stroke: ln.color }"
                 />
               </svg>
               <div
@@ -104,6 +139,17 @@
               >
                 <i class="wp-pin" aria-hidden="true" />
                 <span class="wp-dist">{{ wpDistText }}</span>
+              </div>
+              <div
+                v-for="sm in squadPinsBig"
+                :key="'spb' + sm.userId"
+                class="squad-pin big"
+                :class="{ edge: sm.onEdge }"
+                :style="{ left: `${sm.left}%`, top: `${sm.top}%`, '--pin': sm.color }"
+              >
+                <i class="sp-dot" />
+                <span class="sp-num">{{ sm.slot }}</span>
+                <span class="sp-dist">{{ sm.distText }}</span>
               </div>
               <div
                 v-for="m in markersExpanded"
@@ -142,9 +188,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue'
 import { cellNumberAt } from '@/game/mapGrid'
+import { paintMinimapTerrain, type MinimapSampleFn } from '@/game/mapTerrain'
 import { squadColor, type MapPeer, type SquadMember } from '@/game/squad'
+import type { SquadMark } from '@/game/squadMark'
 
 const props = withDefaults(
   defineProps<{
@@ -154,18 +202,62 @@ const props = withDefaults(
     myUserId?: number
     peers?: MapPeer[]
     squadMembers?: SquadMember[]
+    /** 世界地表采样；未传入时小地图仍显示草地底 */
+    terrainSample?: MinimapSampleFn | null
+    /** 引擎就绪 / 挖放变化时递增，触发重绘 */
+    terrainRev?: number
+    /** 小队战术标记 */
+    squadMarks?: SquadMark[]
   }>(),
   {
     myYaw: 0,
     myUserId: 0,
     peers: () => [],
     squadMembers: () => [],
+    terrainSample: null,
+    terrainRev: 0,
+    squadMarks: () => [],
   }
 )
+
+const emit = defineEmits<{
+  clearMyMark: []
+}>()
 
 const expanded = ref(false)
 const waypoint = ref<{ x: number; z: number } | null>(null)
 const bigFrameEl = ref<HTMLElement | null>(null)
+const miniCanvasEl = ref<HTMLCanvasElement | null>(null)
+const bigCanvasEl = ref<HTMLCanvasElement | null>(null)
+
+let miniRaf = 0
+let bigRaf = 0
+let lastMiniKey = ''
+let lastBigKey = ''
+
+function fallbackSample(): MinimapSampleFn {
+  return () => 'grass'
+}
+
+function sampleAt(x: number, z: number) {
+  return (props.terrainSample || fallbackSample())(x, z)
+}
+
+function scheduleMiniPaint() {
+  if (miniRaf) return
+  miniRaf = requestAnimationFrame(() => {
+    miniRaf = 0
+    paintMini()
+  })
+}
+
+function scheduleBigPaint() {
+  if (bigRaf) return
+  bigRaf = requestAnimationFrame(() => {
+    bigRaf = 0
+    paintBig()
+  })
+}
 
 /** 缩放：1=最远俯瞰，ZOOM_MAX=最近 */
 const ZOOM_MIN = 1
@@ -184,6 +276,66 @@ const centerZ = computed(() => props.myZ + panZ.value)
 const zoomThumb = computed(() => {
   const t = (zoom.value - ZOOM_MIN) / (ZOOM_MAX - ZOOM_MIN)
   return Math.max(4, Math.min(96, t * 100))
+})
+
+function paintMini() {
+  const canvas = miniCanvasEl.value
+  if (!canvas) return
+  const qx = Math.round(props.myX * 2) / 2
+  const qz = Math.round(props.myZ * 2) / 2
+  const key = `${qx},${qz},${props.terrainRev}`
+  if (key === lastMiniKey && canvas.width > 0) return
+  lastMiniKey = key
+  paintMinimapTerrain(canvas, {
+    centerX: props.myX,
+    centerZ: props.myZ,
+    range: MINI_RANGE,
+    sample: sampleAt,
+    maxSamples: 72,
+  })
+}
+
+function paintBig() {
+  const canvas = bigCanvasEl.value
+  if (!canvas || !expanded.value) return
+  const qx = Math.round(centerX.value)
+  const qz = Math.round(centerZ.value)
+  const zr = Math.round(zoom.value * 20) / 20
+  const key = `${qx},${qz},${zr},${props.terrainRev}`
+  if (key === lastBigKey && canvas.width > 0) return
+  lastBigKey = key
+  paintMinimapTerrain(canvas, {
+    centerX: centerX.value,
+    centerZ: centerZ.value,
+    range: viewRange.value,
+    sample: sampleAt,
+    maxSamples: zoom.value > 2.2 ? 160 : 128,
+  })
+}
+
+watch(
+  () => [props.myX, props.myZ, props.terrainRev] as const,
+  () => scheduleMiniPaint(),
+  { flush: 'post', immediate: true }
+)
+
+watch(
+  () =>
+    [expanded.value, centerX.value, centerZ.value, zoom.value, props.terrainRev] as const,
+  async () => {
+    if (!expanded.value) {
+      lastBigKey = ''
+      return
+    }
+    await nextTick()
+    scheduleBigPaint()
+  },
+  { flush: 'post' }
+)
+
+onUnmounted(() => {
+  if (miniRaf) cancelAnimationFrame(miniRaf)
+  if (bigRaf) cancelAnimationFrame(bigRaf)
 })
 
 const myCellNum = computed(() => cellNumberAt(props.myX, props.myZ))
@@ -331,29 +483,78 @@ const navLineBig = computed(() => {
   return { x1: me.left, y1: me.top, x2: wpBig.value.left, y2: wpBig.value.top }
 })
 
-const miniSurfaceStyle = computed(() => ({
-  backgroundPosition: `${(-props.myX * 1.2) % 40}px ${(-props.myZ * 1.2) % 40}px`,
-}))
+const mySquadMark = computed(() =>
+  (props.squadMarks || []).find((m) => m.userId === props.myUserId) || null
+)
 
-/** 放大时格子变大：网格间距随 zoom 增大 */
+function ownerPos(userId: number) {
+  if (userId === props.myUserId) return { x: props.myX, z: props.myZ }
+  const peer = (props.peers || []).find((p) => p.userId === userId)
+  return peer ? { x: peer.x, z: peer.z } : { x: props.myX, z: props.myZ }
+}
+
+function buildSquadPins(range: number, cx: number, cz: number) {
+  return (props.squadMarks || []).map((m) => {
+    const p = project(m.x, m.z, range, cx, cz)
+    const owner = ownerPos(m.userId)
+    const dist = Math.round(Math.hypot(m.x - props.myX, m.z - props.myZ))
+    return {
+      userId: m.userId,
+      slot: m.slot,
+      color: squadColor(m.slot),
+      isMe: m.userId === props.myUserId,
+      left: p.left,
+      top: p.top,
+      onEdge: p.onEdge,
+      distText: `${dist}m`,
+      ownerX: owner.x,
+      ownerZ: owner.z,
+      markX: m.x,
+      markZ: m.z,
+    }
+  })
+}
+
+const squadPinsMini = computed(() =>
+  buildSquadPins(MINI_RANGE, props.myX, props.myZ)
+)
+const squadPinsBig = computed(() =>
+  buildSquadPins(viewRange.value, centerX.value, centerZ.value)
+)
+
+function buildSquadLines(
+  pins: ReturnType<typeof buildSquadPins>,
+  range: number,
+  cx: number,
+  cz: number
+) {
+  return pins.map((p) => {
+    const from = project(p.ownerX, p.ownerZ, range, cx, cz)
+    return {
+      userId: p.userId,
+      color: p.color,
+      x1: from.left,
+      y1: from.top,
+      x2: p.left,
+      y2: p.top,
+    }
+  })
+}
+
+const squadLinesMini = computed(() =>
+  buildSquadLines(squadPinsMini.value, MINI_RANGE, props.myX, props.myZ)
+)
+const squadLinesBig = computed(() =>
+  buildSquadLines(squadPinsBig.value, viewRange.value, centerX.value, centerZ.value)
+)
+
+/** 放大时格子线：约每 8 格（编号单元）一条，随 zoom 变疏密 */
 const bigGridStyle = computed(() => {
-  const cellsAcross = Math.max(3.5, 14 / zoom.value)
+  const cellsAcross = Math.max(2, viewRange.value / 8)
   const pct = 100 / cellsAcross
   return {
     backgroundSize: `${pct}% ${pct}%`,
-    opacity: Math.min(0.55, 0.28 + zoom.value * 0.06),
-  }
-})
-
-const bigSurfaceStyle = computed(() => {
-  // 底图纹理格子也随缩放变大
-  const cell = Math.max(14, 22 * zoom.value)
-  const ox = (-centerX.value * (cell / 16)) % cell
-  const oz = (-centerZ.value * (cell / 16)) % cell
-  return {
-    '--cell': `${cell}px`,
-    backgroundSize: `${cell}px ${cell}px`,
-    backgroundPosition: `${ox}px ${oz}px`,
+    opacity: Math.min(0.35, 0.12 + zoom.value * 0.04),
   }
 })
 
@@ -405,10 +606,13 @@ function openMap() {
   zoom.value = 1.15
   panX.value = 0
   panZ.value = 0
+  lastBigKey = ''
+  nextTick(() => scheduleBigPaint())
 }
 
-function clearWaypoint() {
+function clearAllLocalMarks() {
   waypoint.value = null
+  emit('clearMyMark')
 }
 
 watch(zoom, () => clampPan())
@@ -586,62 +790,35 @@ function onZoomTrack(e: PointerEvent) {
 .map-surface {
   position: absolute;
   inset: 0;
-  background-color: #6a9a4e;
-  background-image:
-    linear-gradient(160deg, rgba(90, 140, 70, 0.55), rgba(55, 95, 55, 0.35)),
-    repeating-linear-gradient(
-      0deg,
-      transparent,
-      transparent 11px,
-      rgba(40, 70, 35, 0.12) 11px,
-      rgba(40, 70, 35, 0.12) 12px
-    ),
-    repeating-linear-gradient(
-      90deg,
-      transparent,
-      transparent 11px,
-      rgba(40, 70, 35, 0.12) 11px,
-      rgba(40, 70, 35, 0.12) 12px
-    ),
-    radial-gradient(ellipse at 30% 40%, rgba(180, 160, 90, 0.22), transparent 45%),
-    radial-gradient(ellipse at 70% 65%, rgba(70, 110, 140, 0.2), transparent 40%);
+  background-color: #5e8f48;
 }
 
 .map-surface.big {
-  background-color: #6a9a4e;
-  background-image:
-    linear-gradient(160deg, rgba(90, 140, 70, 0.4), rgba(55, 95, 55, 0.22)),
-    repeating-linear-gradient(
-      0deg,
-      transparent 0,
-      transparent calc(var(--cell, 24px) - 1px),
-      rgba(30, 55, 28, 0.35) calc(var(--cell, 24px) - 1px),
-      rgba(30, 55, 28, 0.35) var(--cell, 24px)
-    ),
-    repeating-linear-gradient(
-      90deg,
-      transparent 0,
-      transparent calc(var(--cell, 24px) - 1px),
-      rgba(30, 55, 28, 0.35) calc(var(--cell, 24px) - 1px),
-      rgba(30, 55, 28, 0.35) var(--cell, 24px)
-    );
-  background-repeat: repeat;
+  background-color: #5e8f48;
+}
+
+.terrain-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
 }
 
 .map-grid {
   position: absolute;
   inset: 0;
-  opacity: 0.35;
+  opacity: 0.22;
   background-image:
-    linear-gradient(rgba(255, 255, 255, 0.08) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.08) 1px, transparent 1px);
+    linear-gradient(rgba(255, 255, 255, 0.1) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.1) 1px, transparent 1px);
   background-size: 25% 25%;
   pointer-events: none;
 }
 
 .map-grid.dense {
   background-size: 12.5% 12.5%;
-  opacity: 0.4;
 }
 
 .nav-svg {
@@ -661,6 +838,90 @@ function onZoomTrack(e: PointerEvent) {
   stroke-linecap: round;
   opacity: 0.95;
   filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.65));
+}
+
+.squad-mark-line {
+  stroke-width: 1.6;
+  stroke-dasharray: 4 2.5;
+  stroke-linecap: round;
+  opacity: 0.82;
+  filter: none;
+}
+
+.squad-pin {
+  position: absolute;
+  width: 0;
+  height: 0;
+  z-index: 3;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  opacity: 0.95;
+}
+
+.squad-pin .sp-dot {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 9px;
+  height: 9px;
+  border-radius: 50% 50% 50% 0;
+  background: var(--pin, #f0c93a);
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  transform: translate(-50%, -50%) translateY(-6px) rotate(-45deg);
+  box-sizing: border-box;
+  opacity: 0.95;
+}
+
+.squad-pin .sp-num {
+  position: absolute;
+  left: 0;
+  top: -16px;
+  transform: translate(-50%, -50%);
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--pin, #f0c93a);
+  color: #fff;
+  font-size: 0.62rem;
+  font-weight: 800;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  opacity: 0.95;
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.85), 0 1px 1px rgba(0, 0, 0, 0.7);
+  line-height: 1;
+}
+
+.squad-pin .sp-dist {
+  position: absolute;
+  left: 10px;
+  top: -18px;
+  white-space: nowrap;
+  font-size: 0.52rem;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.78);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+}
+
+.squad-pin.big .sp-dot {
+  width: 11px;
+  height: 11px;
+  transform: translate(-50%, -50%) translateY(-8px) rotate(-45deg);
+}
+
+.squad-pin.big .sp-num {
+  width: 18px;
+  height: 18px;
+  font-size: 0.75rem;
+  top: -20px;
+}
+
+.squad-pin.big .sp-dist {
+  font-size: 0.68rem;
+  left: 12px;
+  top: -22px;
 }
 
 .waypoint {

@@ -32,9 +32,12 @@ async function lockLandscapeOrientation() {
 
 /**
  * 全局强制横屏 + 尽量全屏（全站统一：首页/登录/注册/选服/游戏）
+ * portraitMode=true 时保持设备竖屏，不做 CSS 旋转（建模预览等）
  */
 export function useForceLandscape(target: Ref<HTMLElement | null>) {
   const forced = ref(false)
+  /** 为 true 时禁用 CSS 强制横屏 */
+  let portraitMode = false
   let gestureArmed = false
 
   function clear(el: HTMLElement) {
@@ -52,13 +55,18 @@ export function useForceLandscape(target: Ref<HTMLElement | null>) {
     el.style.maxHeight = ''
   }
 
+  function setPortraitMode(on: boolean) {
+    portraitMode = on
+    apply()
+  }
+
   function apply() {
     const el = target.value
     if (!el) return
 
     const w = window.innerWidth
     const h = window.innerHeight
-    const needForce = h > w
+    const needForce = !portraitMode && h > w
     forced.value = needForce
     document.documentElement.classList.toggle('sv-forced-landscape', needForce)
     document.body.classList.toggle('sv-forced-landscape', needForce)
@@ -76,8 +84,13 @@ export function useForceLandscape(target: Ref<HTMLElement | null>) {
       el.style.bottom = 'auto'
       el.style.transformOrigin = '0 0'
       el.style.transform = 'rotate(90deg)'
+      // 键位拖动唯一尺寸源（逻辑横屏宽×高）
+      el.dataset.logicW = String(h)
+      el.dataset.logicH = String(w)
     } else {
       clear(el)
+      delete el.dataset.logicW
+      delete el.dataset.logicH
     }
 
     requestAnimationFrame(() => emitLandscapeLayout())
@@ -135,5 +148,5 @@ export function useForceLandscape(target: Ref<HTMLElement | null>) {
     if (target.value) clear(target.value)
   })
 
-  return { forced, apply, tryNativeLock, ensureFullscreen, armFullscreenGesture }
+  return { forced, apply, tryNativeLock, ensureFullscreen, armFullscreenGesture, setPortraitMode }
 }

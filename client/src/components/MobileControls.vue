@@ -26,41 +26,38 @@
       <span v-if="editing" class="edit-tag">轮盘</span>
     </div>
 
-    <button
+    <!-- 操作键：与轮盘同一套 widget 拖动 -->
+    <div
       v-for="btn in actionButtons"
       :key="btn.id"
-      type="button"
+      role="button"
+      tabindex="0"
       class="widget act"
       :class="[
         btn.id,
         {
-          on: (btn.id === 'crouch' && crouched) || (btn.id === 'place' && buildMode),
-          'mode-build': (btn.id === 'place' || btn.id === 'break') && buildMode,
-          'mode-dig': (btn.id === 'place' || btn.id === 'break') && !buildMode,
+          on: btn.id === 'crouch' && crouched,
+          'mode-build': btn.id === 'break' && buildMode,
+          'mode-dig': btn.id === 'break' && !buildMode,
           selected: editing && selectedId === btn.id,
         },
       ]"
       :style="widgetStyle(btn.id)"
       :title="btnTitle(btn.id)"
-      :aria-pressed="btn.id === 'place' ? buildMode : undefined"
+      :aria-label="btnTitle(btn.id)"
       @pointerdown.prevent.stop="onWidgetDown($event, btn.id)"
-      @pointermove="onBtnDragMove($event, btn.id)"
-      @pointerup="onBtnDragUp($event, btn.id)"
-      @pointercancel="onBtnDragUp($event, btn.id)"
+      @pointermove="onStickOrDragMove($event, btn.id)"
+      @pointerup="onStickOrDragUp($event, btn.id)"
+      @pointercancel="onStickOrDragUp($event, btn.id)"
     >
-      <span
-        v-if="btn.id === 'place' && buildMode"
-        class="mode-pulse"
-        aria-hidden="true"
-      />
+      <span v-if="btn.id === 'break' && buildMode" class="mode-pulse" aria-hidden="true" />
       <span class="act-cap">{{ btnCaption(btn.id) }}</span>
       <GameIcon v-if="btn.id === 'break'" :name="modeIcon" :size="26" />
-      <GameIcon v-else-if="btn.id === 'place'" :name="modeIcon" :size="26" />
       <GameIcon v-else-if="btn.id === 'jump'" name="jump" :size="26" />
       <GameIcon v-else-if="btn.id === 'crouch'" name="crouch" :size="26" />
       <GameIcon v-else-if="btn.id === 'ware'" name="ware" :size="24" />
       <template v-else>{{ btn.label }}</template>
-    </button>
+    </div>
   </div>
 </template>
 
@@ -68,6 +65,12 @@
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import type { ControlId, ControlLayout } from '@/game/controlLayout'
 import { clampItem } from '@/game/controlLayout'
+import {
+  beginDragSession,
+  moveDragSession,
+  screenDeltaToPlayDelta,
+  type DragSession,
+} from '@/game/controlDrag'
 import GameIcon from '@/components/GameIcon.vue'
 import type { IconName } from '@/components/iconData'
 
@@ -93,7 +96,6 @@ const emit = defineEmits<{
   look: [dx: number, dy: number]
   jump: []
   break: []
-  place: []
   crouchToggle: []
   warehouse: []
   select: [id: ControlId]
@@ -113,19 +115,16 @@ const actionButtons: { id: ControlId; label: string; title: string }[] = [
   { id: 'ware', label: '仓', title: '仓库' },
   { id: 'break', label: '挖', title: '操作' },
   { id: 'crouch', label: '蹲', title: '蹲下' },
-  { id: 'place', label: '建', title: '建造模式' },
 ]
 
 function btnTitle(id: ControlId) {
   if (id === 'break') return buildMode.value ? '确认建造' : breakLabel.value
-  if (id === 'place') return buildMode.value ? '建造模式（开）' : '建造模式（关）'
   const btn = actionButtons.find((b) => b.id === id)
   return btn?.title || ''
 }
 
 /** 键位旁短文案（移动端提示） */
 function btnCaption(id: ControlId) {
-  if (id === 'place') return buildMode.value ? '建造中' : '模式'
   if (id === 'break') return buildMode.value ? '放置' : '操作'
   if (id === 'jump') return '跳跃'
   if (id === 'crouch') return crouched.value ? '站立' : '下蹲'
@@ -138,9 +137,9 @@ const stickId = ref<number | null>(null)
 const lookId = ref<number | null>(null)
 const dragId = ref<number | null>(null)
 const dragging = ref<ControlId | null>(null)
+const dragSession = ref<DragSession | null>(null)
 const lastLook = reactive({ x: 0, y: 0 })
 const offset = reactive({ x: 0, y: 0 })
-const dragStart = reactive({ px: 0, py: 0, ix: 0, iy: 0 })
 const BASE_STICK = 110
 const BASE_BTN = 64
 
@@ -148,16 +147,20 @@ function itemOf(id: ControlId) {
   return props.layout.items[id]
 }
 
+function boxSize(id: ControlId) {
+  const base = id === 'stick' ? BASE_STICK : BASE_BTN
+  const s = base * itemOf(id).size
+  return { w: s, h: s }
+}
+
 function widgetStyle(id: ControlId) {
   const it = itemOf(id)
-  const isStick = id === 'stick'
-  const base = isStick ? BASE_STICK : BASE_BTN
-  const size = base * it.size
+  const { w, h } = boxSize(id)
   return {
     left: `${it.x}%`,
     bottom: `${it.y}%`,
-    width: `${size}px`,
-    height: `${size}px`,
+    width: `${w}px`,
+    height: `${h}px`,
     opacity: it.opacity,
   }
 }
@@ -188,7 +191,6 @@ function fireAction(id: ControlId) {
   if (id === 'jump') emit('jump')
   else if (id === 'ware') emit('warehouse')
   else if (id === 'break') emit('break')
-  else if (id === 'place') emit('place')
   else if (id === 'crouch') {
     const now = performance.now()
     if (now - lastCrouchAt < 280) return
@@ -208,8 +210,7 @@ function clampStick(dx: number, dy: number) {
 }
 
 function mapScreenDelta(sx: number, sy: number) {
-  if (!props.rotated) return { x: sx, y: sy }
-  return { x: sy, y: -sx }
+  return screenDeltaToPlayDelta(sx, sy)
 }
 
 function publishMove() {
@@ -217,17 +218,52 @@ function publishMove() {
   emit('move', -offset.y / r, offset.x / r)
 }
 
-/** 拖动时用位移增量（避免旋转坐标反算误差） */
+const winDragOpts: AddEventListenerOptions = { capture: true, passive: false }
+
+function unbindWindowDrag() {
+  window.removeEventListener('pointermove', onWindowDragMove, winDragOpts)
+  window.removeEventListener('pointerup', onWindowDragUp, winDragOpts)
+  window.removeEventListener('pointercancel', onWindowDragUp, winDragOpts)
+}
+
+function bindWindowDrag() {
+  unbindWindowDrag()
+  window.addEventListener('pointermove', onWindowDragMove, winDragOpts)
+  window.addEventListener('pointerup', onWindowDragUp, winDragOpts)
+  window.addEventListener('pointercancel', onWindowDragUp, winDragOpts)
+}
+
+/**
+ * 编辑拖动：绝对跟手 + window capture，不被遮挡层截断。
+ */
 function onWidgetDown(e: PointerEvent, id: ControlId) {
   if (editing.value) {
+    e.preventDefault()
+    e.stopPropagation()
     emit('select', id)
     dragging.value = id
     dragId.value = e.pointerId
-    dragStart.px = e.clientX
-    dragStart.py = e.clientY
-    dragStart.ix = itemOf(id).x
-    dragStart.iy = itemOf(id).y
-    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+    const it = itemOf(id)
+    const el = e.currentTarget as HTMLElement
+    const box = {
+      w: el.offsetWidth || boxSize(id).w,
+      h: el.offsetHeight || boxSize(id).h,
+    }
+    dragSession.value = beginDragSession(
+      e.clientX,
+      e.clientY,
+      e.pointerId,
+      it.x,
+      it.y,
+      box.w,
+      box.h
+    )
+    bindWindowDrag()
+    try {
+      el.setPointerCapture(e.pointerId)
+    } catch {
+      /* window capture 兜底 */
+    }
     return
   }
   if (id === 'stick') {
@@ -253,29 +289,37 @@ function onStickOrDragUp(e: PointerEvent, id: ControlId) {
   if (id === 'stick') onStickUp(e)
 }
 
-function onBtnDragMove(e: PointerEvent, id: ControlId) {
-  if (!editing.value || dragging.value !== id || e.pointerId !== dragId.value) return
-  const play = document.querySelector('.play') as HTMLElement | null
-  const pw = play?.clientWidth || window.innerHeight
-  const ph = play?.clientHeight || window.innerWidth
-  let dx = e.clientX - dragStart.px
-  let dy = e.clientY - dragStart.py
-  if (props.rotated) {
-    // 画面右 = 屏幕下；画面上 = 屏幕右
-    const mapped = mapScreenDelta(dx, dy)
-    dx = mapped.x
-    dy = mapped.y
-  }
-  const nx = dragStart.ix + (dx / pw) * 100
-  const ny = dragStart.iy - (dy / ph) * 100
-  const clamped = clampItem({ ...itemOf(id), x: nx, y: ny })
+function applyDragFromPointer(e: PointerEvent) {
+  const id = dragging.value
+  const session = dragSession.value
+  if (!editing.value || !id || !session || e.pointerId !== session.pointerId) return
+  const next = moveDragSession(e.clientX, e.clientY, session)
+  const clamped = clampItem({ ...itemOf(id), x: next.x, y: next.y })
   emit('update-item', id, { x: clamped.x, y: clamped.y })
 }
 
-function onBtnDragUp(e: PointerEvent, id: ControlId) {
-  if (dragging.value !== id || e.pointerId !== dragId.value) return
+function onWindowDragMove(e: PointerEvent) {
+  if (!dragging.value || e.pointerId !== dragId.value) return
+  e.preventDefault()
+  applyDragFromPointer(e)
+}
+
+function onWindowDragUp(e: PointerEvent) {
+  if (e.pointerId !== dragId.value) return
+  e.preventDefault()
+  onBtnDragUp(e)
+}
+
+function onBtnDragMove(e: PointerEvent, id: ControlId) {
+  if (!editing.value || dragging.value !== id || e.pointerId !== dragId.value) return
+  applyDragFromPointer(e)
+}
+
+function onBtnDragUp(_e?: PointerEvent, _id?: ControlId) {
   dragging.value = null
   dragId.value = null
+  dragSession.value = null
+  unbindWindowDrag()
 }
 
 function onStickDown(e: PointerEvent) {
@@ -340,10 +384,13 @@ watch(editing, (on) => {
     emit('move', 0, 0)
     stickId.value = null
     lookId.value = null
+  } else {
+    onBtnDragUp()
   }
 })
 
 onBeforeUnmount(() => {
+  onBtnDragUp()
   emit('move', 0, 0)
 })
 </script>
@@ -357,8 +404,16 @@ onBeforeUnmount(() => {
 }
 
 .controls.editing {
-  z-index: 12;
-  background: rgba(0, 0, 0, 0.25);
+  z-index: 40;
+}
+
+.controls.editing::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.22);
+  pointer-events: none;
+  z-index: 0;
 }
 
 .look-layer,
@@ -417,7 +472,8 @@ onBeforeUnmount(() => {
 }
 
 .act {
-  position: relative;
+  /* 必须 absolute：相对定位会覆盖 .widget，导致键位挤叠、拖动受限 */
+  position: absolute;
   border-radius: 50%;
   border: 2px solid rgba(255, 255, 255, 0.55);
   background: rgba(20, 36, 42, 0.72);
@@ -459,14 +515,12 @@ onBeforeUnmount(() => {
   pointer-events: none;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
 }
-.act.place.mode-build .act-cap,
 .act.break.mode-build .act-cap {
   border-color: rgba(142, 240, 180, 0.75);
   color: #d9ffe8;
   background: rgba(12, 40, 28, 0.92);
 }
-.act.break.mode-dig .act-cap,
-.act.place.mode-dig .act-cap {
+.act.break.mode-dig .act-cap {
   border-color: rgba(255, 180, 130, 0.6);
   color: #ffe8d8;
 }
@@ -512,21 +566,6 @@ onBeforeUnmount(() => {
   color: #d8ffe8;
   box-shadow: 0 0 0 1px rgba(110, 230, 160, 0.28);
 }
-.act.place.mode-dig {
-  border-color: rgba(200, 210, 220, 0.75);
-  background: rgba(32, 42, 52, 0.72);
-  color: #d7e2ea;
-}
-.act.place.mode-build,
-.act.place.on {
-  border-color: #8ef0b4;
-  background: linear-gradient(160deg, rgba(36, 110, 72, 0.92), rgba(22, 64, 44, 0.88));
-  color: #e9fff2;
-  box-shadow:
-    0 0 0 2px rgba(110, 230, 160, 0.35),
-    0 0 16px rgba(80, 200, 140, 0.45);
-  transform: scale(1.06);
-}
 .mode-pulse {
   position: absolute;
   inset: -5px;
@@ -562,6 +601,7 @@ onBeforeUnmount(() => {
   outline: 2px solid #f0c878;
   outline-offset: 3px;
   box-shadow: 0 0 0 4px rgba(240, 200, 120, 0.25);
+  z-index: 6;
 }
 
 @media (min-width: 900px) and (pointer: fine) {

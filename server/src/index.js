@@ -5,10 +5,13 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 const { WebSocketServer } = require('ws');
+const fs = require('fs');
+const path = require('path');
 
 const config = require('./config');
 const redis = require('./db/redis');
 const { fail } = require('./utils/response');
+const { query } = require('./db/mysql');
 
 const healthRoutes = require('./routes/health');
 const authRoutes = require('./routes/auth');
@@ -18,85 +21,46 @@ const serverRoutes = require('./routes/servers');
 const partyRoutes = require('./routes/party');
 const serverService = require('./services/serverService');
 const { attachPresenceHub } = require('./ws/presenceHub');
-const fs = require('fs');
-const path = require('path');
-const { query } = require('./db/mysql');
 
-async function ensurePartyTables() {
+/**
+ * 执行 sql 文件：先去掉 -- 注释行，再按分号拆分。
+ * 旧逻辑用 startsWith('--') 过滤整段，导致带文件头注释的 CREATE 被整段丢掉。
+ */
+async function runSqlFile(fileName, label) {
   try {
-    const sqlPath = path.join(__dirname, '../sql/party.sql');
+    const sqlPath = path.join(__dirname, '../sql', fileName);
     const raw = fs.readFileSync(sqlPath, 'utf8');
-    // 跳过 USE 语句，按分号拆分执行
-    const statements = raw
-      .split(/;\s*\n/)
+    const cleaned = raw
+      .split(/\r?\n/)
+      .filter((line) => {
+        const t = line.trim();
+        return t && !t.startsWith('--');
+      })
+      .join('\n');
+    const statements = cleaned
+      .split(';')
       .map((s) => s.trim())
-      .filter((s) => s && !s.startsWith('--') && !/^USE\b/i.test(s));
+      .filter((s) => s && !/^USE\b/i.test(s));
+    if (!statements.length) {
+      console.warn(`[server] ${label}: no SQL statements in ${fileName}`);
+      return;
+    }
     for (const stmt of statements) {
       await query(stmt);
     }
-    console.log('[server] party tables ready');
+    console.log(`[server] ${label} ready (${statements.length} stmt)`);
   } catch (err) {
-    console.warn('[server] party table ensure skipped:', err.message);
-  }
-}
-
-async function ensureControlLayoutTable() {
-  try {
-    const sqlPath = path.join(__dirname, '../sql/control_layout.sql');
-    const raw = fs.readFileSync(sqlPath, 'utf8');
-    const statements = raw
-      .split(/;\s*\n/)
-      .map((s) => s.trim())
-      .filter((s) => s && !s.startsWith('--') && !/^USE\b/i.test(s));
-    for (const stmt of statements) {
-      await query(stmt);
-    }
-    console.log('[server] control_layouts table ready');
-  } catch (err) {
-    console.warn('[server] control_layouts ensure skipped:', err.message);
-  }
-}
-
-async function ensureServerBlocksTable() {
-  try {
-    const sqlPath = path.join(__dirname, '../sql/server_blocks.sql');
-    const raw = fs.readFileSync(sqlPath, 'utf8');
-    const statements = raw
-      .split(/;\s*\n/)
-      .map((s) => s.trim())
-      .filter((s) => s && !s.startsWith('--') && !/^USE\b/i.test(s));
-    for (const stmt of statements) {
-      await query(stmt);
-    }
-    console.log('[server] server_block_overrides table ready');
-  } catch (err) {
-    console.warn('[server] server_block_overrides ensure skipped:', err.message);
-  }
-}
-
-async function ensureServerAnchorsTable() {
-  try {
-    const sqlPath = path.join(__dirname, '../sql/server_anchors.sql');
-    const raw = fs.readFileSync(sqlPath, 'utf8');
-    const statements = raw
-      .split(/;\s*\n/)
-      .map((s) => s.trim())
-      .filter((s) => s && !s.startsWith('--') && !/^USE\b/i.test(s));
-    for (const stmt of statements) {
-      await query(stmt);
-    }
-    console.log('[server] server_player_anchors table ready');
-  } catch (err) {
-    console.warn('[server] server_player_anchors ensure skipped:', err.message);
+    console.warn(`[server] ${label} ensure failed:`, err.message);
   }
 }
 
 async function bootstrap() {
   await redis.initRedis();
-  await ensurePartyTables();
-  await ensureControlLayoutTable();
-  await ensureServerBlocksTable();
-  await ensureServerAnchorsTable();
+  await runSqlFile('party.sql', 'party tables');
+  await runSqlFile('control_layout.sql', 'control_layouts');
+  await runSqlFile('server_blocks.sql', 'server_block_overrides');
+  await runSqlFile('server_anchors.sql', 'server_player_anchors');
+  await runSqlFile('server_inventory.sql', 'server_player_inventories');
 
   const app = express();
   app.set('trust proxy', 1);
@@ -104,9 +68,7 @@ async function bootstrap() {
   app.use(helmet({ contentSecurityPolicy: false }));
   app.use(
     cors({
-      origin: config.isProd
-        ? config.clientOrigin
-        : true,
+      origin: config.isProd ? config.clientOrigin : true,
       credentials: true,
     })
   );
@@ -130,7 +92,6 @@ async function bootstrap() {
   app.use('/api/servers', serverRoutes);
   app.use('/api/party', partyRoutes);
 
-  // 清理超时会话 + 刷新服状态
   setInterval(() => {
     serverService.purgeStaleSessions().catch(() => undefined);
   }, 20000);

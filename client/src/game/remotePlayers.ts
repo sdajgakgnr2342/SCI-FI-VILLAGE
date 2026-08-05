@@ -93,6 +93,7 @@ export class RemotePlayerManager {
   private tmp = new THREE.Vector3()
   /** userId → 小队号码 1..4；非队友不显示头顶标记 */
   private squadSlots = new Map<number, number>()
+  private tick = 0
   audio: GameAudio | null = null
   listener: (() => { x: number; z: number }) | null = null
 
@@ -189,12 +190,15 @@ export class RemotePlayerManager {
 
   update(dt: number) {
     const now = Date.now()
+    this.tick++
+    const listener = this.listener?.()
     for (const a of this.agents.values()) {
       if (now - a.lastTs > 12000) {
         this.remove(a.userId)
         continue
       }
 
+      // 位置插值始终做，远处降频肢体动画与音效
       a.mesh.position.lerp(a.target, 1 - Math.exp(-10 * dt))
       let dy = a.yaw - (a.mesh.userData.smoothYaw ?? a.yaw)
       while (dy > Math.PI) dy -= Math.PI * 2
@@ -203,11 +207,23 @@ export class RemotePlayerManager {
       a.mesh.userData.smoothYaw = smooth
       a.mesh.rotation.y = smooth + Math.PI
 
+      let far = false
+      if (listener) {
+        const dx = a.mesh.position.x - listener.x
+        const dz = a.mesh.position.z - listener.z
+        const d2 = dx * dx + dz * dz
+        if (d2 > 70 * 70 && this.tick % 3 !== 0) far = true
+        else if (d2 > 40 * 40 && (this.tick & 1) === 1) far = true
+      }
+      if (far) {
+        a.mesh.scale.y = a.crouching ? 0.82 : 1
+        continue
+      }
+
       const moving = a.mesh.position.distanceToSquared(a.target) > 0.002
       if (moving) a.phase += dt * 8
       const swing = moving ? Math.sin(a.phase) * 0.45 : 0
 
-      const listener = this.listener?.()
       if (this.audio && listener) {
         const at = { x: a.mesh.position.x, z: a.mesh.position.z }
         const speed = Math.hypot(a.target.x - a.mesh.position.x, a.target.z - a.mesh.position.z)

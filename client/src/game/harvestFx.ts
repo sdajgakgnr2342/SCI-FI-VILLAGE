@@ -1,5 +1,4 @@
 import * as THREE from 'three'
-import type { MaterialId } from './inventory'
 
 export type HarvestKind = 'dig' | 'chop' | 'mine' | 'build' | 'clear'
 
@@ -11,9 +10,6 @@ export const ACTION_DURATION: Record<HarvestKind, number> = {
   mine: 1.2,
   clear: 0.3,
 }
-
-/** 树墩/碎石残留后自动入库消失 */
-export const REMNANT_LIFETIME = 5
 
 export function actionLabel(kind: HarvestKind | null): string {
   switch (kind) {
@@ -138,7 +134,6 @@ export class NotchOverlay {
     this.mesh.scale.set(1, h / 0.28, inset / 0.22)
     const nx = face.x || 0
     const nz = face.z || (face.y !== 0 ? 1 : 0)
-    const ny = 0
     // 缺口嵌在朝向玩家的一侧
     this.mesh.position.set(
       x + 0.5 - nx * (0.5 - inset * 0.35),
@@ -164,7 +159,6 @@ export class NotchOverlay {
 /** 石头裂纹加深 */
 export class CrackOverlay {
   readonly mesh: THREE.Mesh
-  private stage = 0
 
   constructor(private scene: THREE.Scene) {
     const geo = new THREE.PlaneGeometry(0.95, 0.95)
@@ -181,7 +175,6 @@ export class CrackOverlay {
   }
 
   showAt(x: number, y: number, z: number, face: { x: number; y: number; z: number }, stage: number) {
-    this.stage = stage
     const op = 0.25 + Math.min(3, stage) * 0.2
     ;(this.mesh.material as THREE.MeshBasicMaterial).opacity = op
     this.mesh.position.set(
@@ -206,14 +199,4 @@ export class CrackOverlay {
     this.mesh.geometry.dispose()
     ;(this.mesh.material as THREE.Material).dispose()
   }
-}
-
-export interface Remnant {
-  x: number
-  y: number
-  z: number
-  mat: MaterialId
-  amount: number
-  expire: number
-  kind: 'stump' | 'rubble'
 }

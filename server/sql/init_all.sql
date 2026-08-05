@@ -179,6 +179,16 @@ CREATE TABLE IF NOT EXISTS `server_block_overrides` (
   CONSTRAINT `fk_sbo_server` FOREIGN KEY (`server_id`) REFERENCES `game_servers` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- 每服每玩家仓库
+CREATE TABLE IF NOT EXISTS `server_player_inventories` (
+  `user_id` BIGINT UNSIGNED NOT NULL,
+  `server_id` BIGINT UNSIGNED NOT NULL,
+  `inv_json` JSON NOT NULL,
+  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`user_id`, `server_id`),
+  KEY `idx_inv_server` (`server_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- 种子服：仅第一台 open，其余 standby（空库时才插入）
 INSERT INTO `game_servers` (`code`, `name`, `seed`, `max_players`, `status`)
 SELECT * FROM (

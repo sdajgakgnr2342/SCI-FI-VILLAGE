@@ -22,7 +22,16 @@ async function join(req, res) {
 
 async function leave(req, res) {
   try {
-    await serverService.leaveServer(req.user.id);
+    const body = req.body || {};
+    await serverService.leaveServer(req.user.id, {
+      serverId: body.serverId != null ? Number(body.serverId) : null,
+      x: body.x,
+      y: body.y,
+      z: body.z,
+      yaw: body.yaw,
+      pitch: body.pitch,
+      inventory: body.inventory,
+    });
     return ok(res, true, '已离开');
   } catch (err) {
     return fail(res, 500, err.message || '离开失败');
@@ -78,22 +87,18 @@ async function queryBlocks(req, res) {
     const serverId = Number(req.query.serverId);
     const minX = Number(req.query.minX);
     const maxX = Number(req.query.maxX);
-    const minY = Number(req.query.minY ?? 0);
-    const maxY = Number(req.query.maxY ?? 48);
+    const minY = Number(req.query.minY ?? -16);
+    const maxY = Number(req.query.maxY ?? 96);
     const minZ = Number(req.query.minZ);
     const maxZ = Number(req.query.maxZ);
     if (!serverId || [minX, maxX, minZ, maxZ].some((n) => Number.isNaN(n))) {
       return fail(res, 400, '范围参数不完整');
     }
-    const list = await serverService.getServerBlocksInRange(serverId, {
-      x: minX,
-      y: minY,
-      z: minZ,
-    }, {
-      x: maxX,
-      y: maxY,
-      z: maxZ,
-    });
+    const list = await serverService.getServerBlocksInRange(
+      serverId,
+      { x: minX, y: minY, z: minZ },
+      { x: maxX, y: maxY, z: maxZ }
+    );
     return ok(res, list);
   } catch (err) {
     return fail(res, err.status || 500, err.message || '获取方块失败');
@@ -106,7 +111,7 @@ async function saveBlocks(req, res) {
     if (!serverId || !Array.isArray(blocks) || !blocks.length) {
       return fail(res, 400, '参数不完整');
     }
-    if (blocks.length > 256) {
+    if (blocks.length > 512) {
       return fail(res, 400, '单次方块过多');
     }
     const saved = await serverService.setServerBlocks(
@@ -120,6 +125,24 @@ async function saveBlocks(req, res) {
   }
 }
 
+async function saveInventory(req, res) {
+  try {
+    const { serverId, inventory } = req.body || {};
+    if (!serverId || !inventory || typeof inventory !== 'object') {
+      return fail(res, 400, '参数不完整');
+    }
+    // 借 heartbeat 的会话校验：先查会话
+    const saved = await serverService.saveInventoryForSession(
+      req.user.id,
+      Number(serverId),
+      inventory
+    );
+    return ok(res, saved);
+  } catch (err) {
+    return fail(res, err.status || 500, err.message || '保存仓库失败');
+  }
+}
+
 module.exports = {
   list,
   join,
@@ -129,4 +152,5 @@ module.exports = {
   detail,
   queryBlocks,
   saveBlocks,
+  saveInventory,
 };

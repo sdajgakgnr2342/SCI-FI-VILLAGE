@@ -38,6 +38,12 @@ const router = createRouter({
       component: () => import('@/views/PlayView.vue'),
       meta: { auth: true },
     },
+    {
+      path: '/dev/models',
+      name: 'model-lab',
+      component: () => import('@/views/ModelLabView.vue'),
+      meta: { portrait: true },
+    },
   ],
 })
 
