@@ -97,11 +97,17 @@ onMounted(refresh)
 <style scoped>
 .worlds {
   height: 100%;
+  height: 100dvh;
   overflow: auto;
-  padding: 2rem clamp(1rem, 4vw, 3rem);
+  -webkit-overflow-scrolling: touch;
+  padding:
+    max(1rem, env(safe-area-inset-top))
+    max(1rem, env(safe-area-inset-right))
+    max(1.25rem, env(safe-area-inset-bottom))
+    max(1rem, env(safe-area-inset-left));
   background:
-    radial-gradient(ellipse at top, rgba(61, 214, 198, 0.1), transparent 45%),
-    linear-gradient(180deg, #071015, #0c2430);
+    radial-gradient(ellipse at top, rgba(120, 190, 255, 0.28), transparent 45%),
+    linear-gradient(180deg, #eaf5fb, #d8ebe0);
 }
 
 header {
@@ -150,7 +156,7 @@ form select {
   padding: 0.65rem 0.75rem;
   border-radius: 4px;
   border: 1px solid var(--line);
-  background: rgba(0, 0, 0, 0.35);
+  background: rgba(255, 255, 255, 0.8);
   color: var(--text);
 }
 
@@ -168,7 +174,7 @@ li {
   gap: 1rem;
   padding: 0.9rem 1rem;
   border: 1px solid var(--line);
-  background: rgba(12, 28, 34, 0.65);
+  background: rgba(255, 255, 255, 0.72);
   border-radius: 6px;
 }
 
@@ -182,6 +188,9 @@ li a {
   padding: 0.45rem 0.9rem;
   border: 1px solid var(--line);
   border-radius: 4px;
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
 }
 
 .empty, .error {
@@ -189,4 +198,12 @@ li a {
 }
 
 .error { color: var(--danger); margin-top: 0.5rem; }
+
+@media (orientation: landscape) and (max-height: 480px) {
+  header {
+    margin-bottom: 1rem;
+  }
+  h1 { font-size: 1.35rem; }
+  .create, .list { margin-bottom: 1rem; }
+}
 </style>

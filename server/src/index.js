@@ -14,9 +14,89 @@ const healthRoutes = require('./routes/health');
 const authRoutes = require('./routes/auth');
 const worldRoutes = require('./routes/worlds');
 const playerRoutes = require('./routes/player');
+const serverRoutes = require('./routes/servers');
+const partyRoutes = require('./routes/party');
+const serverService = require('./services/serverService');
+const { attachPresenceHub } = require('./ws/presenceHub');
+const fs = require('fs');
+const path = require('path');
+const { query } = require('./db/mysql');
+
+async function ensurePartyTables() {
+  try {
+    const sqlPath = path.join(__dirname, '../sql/party.sql');
+    const raw = fs.readFileSync(sqlPath, 'utf8');
+    // 跳过 USE 语句，按分号拆分执行
+    const statements = raw
+      .split(/;\s*\n/)
+      .map((s) => s.trim())
+      .filter((s) => s && !s.startsWith('--') && !/^USE\b/i.test(s));
+    for (const stmt of statements) {
+      await query(stmt);
+    }
+    console.log('[server] party tables ready');
+  } catch (err) {
+    console.warn('[server] party table ensure skipped:', err.message);
+  }
+}
+
+async function ensureControlLayoutTable() {
+  try {
+    const sqlPath = path.join(__dirname, '../sql/control_layout.sql');
+    const raw = fs.readFileSync(sqlPath, 'utf8');
+    const statements = raw
+      .split(/;\s*\n/)
+      .map((s) => s.trim())
+      .filter((s) => s && !s.startsWith('--') && !/^USE\b/i.test(s));
+    for (const stmt of statements) {
+      await query(stmt);
+    }
+    console.log('[server] control_layouts table ready');
+  } catch (err) {
+    console.warn('[server] control_layouts ensure skipped:', err.message);
+  }
+}
+
+async function ensureServerBlocksTable() {
+  try {
+    const sqlPath = path.join(__dirname, '../sql/server_blocks.sql');
+    const raw = fs.readFileSync(sqlPath, 'utf8');
+    const statements = raw
+      .split(/;\s*\n/)
+      .map((s) => s.trim())
+      .filter((s) => s && !s.startsWith('--') && !/^USE\b/i.test(s));
+    for (const stmt of statements) {
+      await query(stmt);
+    }
+    console.log('[server] server_block_overrides table ready');
+  } catch (err) {
+    console.warn('[server] server_block_overrides ensure skipped:', err.message);
+  }
+}
+
+async function ensureServerAnchorsTable() {
+  try {
+    const sqlPath = path.join(__dirname, '../sql/server_anchors.sql');
+    const raw = fs.readFileSync(sqlPath, 'utf8');
+    const statements = raw
+      .split(/;\s*\n/)
+      .map((s) => s.trim())
+      .filter((s) => s && !s.startsWith('--') && !/^USE\b/i.test(s));
+    for (const stmt of statements) {
+      await query(stmt);
+    }
+    console.log('[server] server_player_anchors table ready');
+  } catch (err) {
+    console.warn('[server] server_player_anchors ensure skipped:', err.message);
+  }
+}
 
 async function bootstrap() {
   await redis.initRedis();
+  await ensurePartyTables();
+  await ensureControlLayoutTable();
+  await ensureServerBlocksTable();
+  await ensureServerAnchorsTable();
 
   const app = express();
   app.set('trust proxy', 1);
@@ -24,7 +104,9 @@ async function bootstrap() {
   app.use(helmet({ contentSecurityPolicy: false }));
   app.use(
     cors({
-      origin: config.clientOrigin,
+      origin: config.isProd
+        ? config.clientOrigin
+        : true,
       credentials: true,
     })
   );
@@ -45,6 +127,13 @@ async function bootstrap() {
   app.use('/api/auth', authRoutes);
   app.use('/api/worlds', worldRoutes);
   app.use('/api/player', playerRoutes);
+  app.use('/api/servers', serverRoutes);
+  app.use('/api/party', partyRoutes);
+
+  // 清理超时会话 + 刷新服状态
+  setInterval(() => {
+    serverService.purgeStaleSessions().catch(() => undefined);
+  }, 20000);
 
   app.use((req, res) => fail(res, 404, '接口不存在'));
   app.use((err, req, res, next) => {
@@ -54,27 +143,14 @@ async function bootstrap() {
 
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: '/ws' });
-
-  wss.on('connection', (socket) => {
-    socket.send(JSON.stringify({ type: 'welcome', message: 'Sci-Fi Village WS ready' }));
-
-    socket.on('message', (raw) => {
-      let msg;
-      try {
-        msg = JSON.parse(String(raw));
-      } catch {
-        return;
-      }
-      // broadcast presence / block updates to peers (skeleton)
-      if (msg && (msg.type === 'presence' || msg.type === 'block')) {
-        const payload = JSON.stringify(msg);
-        wss.clients.forEach((client) => {
-          if (client !== socket && client.readyState === 1) {
-            client.send(payload);
-          }
-        });
-      }
-    });
+  attachPresenceHub(wss);
+  server.on('error', (err) => {
+    if (err && err.code === 'EADDRINUSE') {
+      console.error(`[server] port ${config.port} is already in use`);
+      process.exit(1);
+    }
+    console.error('[server] listen error:', err);
+    process.exit(1);
   });
 
   server.listen(config.port, () => {

@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { getLastServerId } from '@/utils/lastServer'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -22,13 +23,17 @@ const router = createRouter({
       meta: { guest: true },
     },
     {
-      path: '/worlds',
-      name: 'worlds',
-      component: () => import('@/views/WorldsView.vue'),
+      path: '/servers',
+      name: 'servers',
+      component: () => import('@/views/ServersView.vue'),
       meta: { auth: true },
     },
     {
-      path: '/play/:worldId',
+      path: '/worlds',
+      redirect: '/servers',
+    },
+    {
+      path: '/play/:serverId',
       name: 'play',
       component: () => import('@/views/PlayView.vue'),
       meta: { auth: true },
@@ -42,7 +47,9 @@ router.beforeEach((to) => {
     return { name: 'login', query: { redirect: to.fullPath } }
   }
   if (to.meta.guest && auth.token) {
-    return { name: 'worlds' }
+    const last = getLastServerId()
+    if (last) return { name: 'play', params: { serverId: String(last) } }
+    return { name: 'servers' }
   }
   return true
 })

@@ -4,9 +4,7 @@ const mysql = require('mysql2/promise');
 const config = require('../config');
 
 async function init() {
-  const schemaPath = path.resolve(__dirname, '../../sql/schema.sql');
-  const sql = fs.readFileSync(schemaPath, 'utf8');
-
+  const files = ['schema.sql', 'servers.sql'];
   const conn = await mysql.createConnection({
     host: config.db.host,
     port: config.db.port,
@@ -16,8 +14,13 @@ async function init() {
   });
 
   try {
-    await conn.query(sql);
-    console.log(`[db:init] schema applied to ${config.db.database} @ ${config.db.host}`);
+    for (const file of files) {
+      const sqlPath = path.resolve(__dirname, '../../sql', file);
+      const sql = fs.readFileSync(sqlPath, 'utf8');
+      await conn.query(sql);
+      console.log(`[db:init] applied ${file}`);
+    }
+    console.log(`[db:init] done @ ${config.db.host}/${config.db.database}`);
   } finally {
     await conn.end();
   }
