@@ -344,14 +344,21 @@
       </div>
     </div>
 
+    <div v-if="deploying" class="deploy-banner" aria-live="polite">
+      <div class="deploy-title">准备投送</div>
+      <div class="deploy-count">{{ deploySecText }}</div>
+      <div class="deploy-sub">后台铺图中 · 舱内活动，倒计时结束后回到上次位置</div>
+      <div class="deploy-bar"><i :style="{ width: `${deployTimePct}%` }" /></div>
+    </div>
+
     <div v-if="loading || leaving" class="overlay">
       <LoadingSpinner :text="leaving ? '正在离开…' : '进入服务器…'" />
     </div>
     <div v-else-if="error" class="overlay error">{{ error }}</div>
 
-    <div v-if="!loading && !error" class="aim" :class="{ build: buildMode }">
+    <div v-if="!loading && !error" class="aim" :class="{ build: buildMode, dim: deploying }">
       <div class="crosshair" />
-      <div v-if="actionHint" class="aim-toast">{{ actionHint }}</div>
+      <div v-if="actionHint && !deploying" class="aim-toast">{{ actionHint }}</div>
     </div>
   </div>
 </template>
@@ -432,6 +439,11 @@ const error = ref('')
 const serverName = ref('')
 const hint = ref('')
 const peerHint = ref('')
+/** 进服准备舱倒计时 */
+const deploying = ref(false)
+const deployRemain = ref(0)
+const deployTimePct = ref(0)
+const deploySecText = computed(() => Math.max(0, Math.ceil(deployRemain.value)))
 const isTouch = ref(false)
 const showWare = ref(false)
 const showSettings = ref(false)
@@ -551,13 +563,19 @@ function shortChatName(userId: number, fallback?: string | null) {
 }
 
 function pushBroadcast(item: SquadChatItem) {
-  if (item.channel !== 'team' || item.kind !== 'chat') return
+  const isTeamChat = item.channel === 'team' && item.kind === 'chat'
+  const isMark = item.kind === 'mark'
+  if (!isTeamChat && !isMark) return
   const selfId = auth.user?.id || 0
   const who = item.userId === selfId ? '我' : item.name || '队友'
+  const text =
+    isMark
+      ? item.text || `标记了${item.mark?.label || '地点'}`
+      : item.text
   const id = item.id
   const merged = [
     ...broadcastLive.value.filter((b) => b.id !== id),
-    { id, who, text: item.text },
+    { id, who, text },
   ]
   if (merged.length > BROADCAST_MAX) {
     const dropped = merged.slice(0, merged.length - BROADCAST_MAX)
@@ -828,6 +846,7 @@ let offLayout: (() => void) | undefined
 let hintTimer: number | undefined
 let presenceAcc = 0
 let mapPeerAcc = 0
+let mapMeAcc = 0
 let lastBlockFetchKey = ''
 
 const BLOCK_FETCH_RADIUS = 112
@@ -1485,9 +1504,47 @@ onMounted(async () => {
     syncEngineLoadout()
 
     const sp = data.player
-    engine.setSpawn(sp.x, sp.y || SURFACE_Y + 2, sp.z, sp.yaw, sp.pitch)
-    await fetchBlocksAround(sp.x, sp.z, true)
+    const dropX = sp.x
+    const dropZ = sp.z
+    const dropY = sp.y || SURFACE_Y + 2
+    mapMe.x = dropX
+    mapMe.z = dropZ
+    mapMe.yaw = sp.yaw || 0
+
+    deploying.value = true
+    deployRemain.value = 30
+    deployTimePct.value = 0
+    engine.beginDeploy(
+      { x: dropX, y: dropY, z: dropZ, yaw: sp.yaw, pitch: sp.pitch },
+      {
+        durationSec: 30,
+        onProgress: (remain, timeProgress) => {
+          deployRemain.value = remain
+          deployTimePct.value = Math.round(Math.min(1, Math.max(0, timeProgress)) * 100)
+        },
+        onComplete: () => {
+          deploying.value = false
+          deployRemain.value = 0
+          deployTimePct.value = 100
+          if (engine) {
+            mapMe.x = engine.camera.position.x
+            mapMe.z = engine.camera.position.z
+            fetchBlocksAround(engine.camera.position.x, engine.camera.position.z, true).catch(
+              () => undefined
+            )
+          }
+          hint.value = '已抵达'
+          window.setTimeout(() => {
+            if (hint.value === '已抵达') hint.value = ''
+          }, 1600)
+        },
+      }
+    )
+    // 后台拉落点方块覆盖（与网格预载并行）
+    fetchBlocksAround(dropX, dropZ, true).catch(() => undefined)
+
     engine.onPosition = (pos) => {
+      if (engine?.deploying) return
       hint.value = `${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}`
       serverHeartbeat({
         serverId,
@@ -1502,23 +1559,41 @@ onMounted(async () => {
     engine.onFrame = (dt) => {
       const eng = engine
       if (!eng) return
-      npc?.update(dt)
-      remotes?.update(dt)
+      if (!eng.deploying) {
+        npc?.update(dt)
+        remotes?.update(dt)
+      }
       if (eng.tool !== tool.value) tool.value = eng.tool
-      crouched.value = eng.crouching
-      mapMe.x = eng.camera.position.x
-      mapMe.z = eng.camera.position.z
-      mapMe.yaw = eng.getPose().yaw
+      if (crouched.value !== eng.crouching) crouched.value = eng.crouching
+
+      // 小地图 / 格子号 ~10Hz，避免每帧写 reactive 触发 Vue 更新
+      mapMeAcc += dt
+      if (mapMeAcc > 0.1) {
+        mapMeAcc = 0
+        if (eng.deploying) {
+          // 准备舱：小地图盯着落点，不跟天上舱晃
+          mapMe.x = dropX
+          mapMe.z = dropZ
+          mapMe.yaw = eng.getPose().yaw
+        } else {
+          mapMe.x = eng.camera.position.x
+          mapMe.z = eng.camera.position.z
+          mapMe.yaw = eng.getPose().yaw
+        }
+      }
       mapPeerAcc += dt
       if (mapPeerAcc > 0.25) {
         mapPeerAcc = 0
         mapPeers.value = remotes?.listMapPeers() || []
       }
-      natureAudio?.setCreekDistance(eng.getCreekDistance(mapMe.x, mapMe.z))
-      syncActionUi()
+      if (!eng.deploying) {
+        natureAudio?.setCreekDistance(
+          eng.getCreekDistance(eng.camera.position.x, eng.camera.position.z)
+        )
+      }
 
       presenceAcc += dt
-      if (presenceAcc > 0.12 && presence) {
+      if (presenceAcc > 0.12 && presence && !eng.deploying) {
         presenceAcc = 0
         const pose = eng.getPose()
         presence.sendPresence({
@@ -1539,7 +1614,7 @@ onMounted(async () => {
       engine.camera,
       data.npcPolicy as import('@/api/server').NpcPolicy,
       {
-        standY: (x, z) => engine!.getNpcStandY(x, z),
+        standY: () => engine!.getNpcStandY(),
         walkable: (x, z) => engine!.isNpcWalkable(x, z),
         nearBuild: (x, z, r) => engine!.isPlayerStructureNear(x, z, r ?? 5),
       }
@@ -2572,5 +2647,63 @@ onBeforeUnmount(() => {
   letter-spacing: 0.08em;
   text-align: center;
   padding: 1.5rem;
+}
+
+.deploy-banner {
+  position: absolute;
+  left: 50%;
+  top: 12%;
+  transform: translateX(-50%);
+  z-index: 18;
+  min-width: min(78vw, 320px);
+  padding: 0.85rem 1.15rem 1rem;
+  text-align: center;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(8, 22, 34, 0.82), rgba(8, 22, 34, 0.55));
+  border: 1px solid rgba(140, 210, 255, 0.35);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+}
+
+.deploy-title {
+  font-family: var(--font-display, 'Segoe UI', sans-serif);
+  font-size: 0.72rem;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: rgba(186, 230, 255, 0.9);
+}
+
+.deploy-count {
+  margin-top: 0.15rem;
+  font-family: var(--font-display, 'Segoe UI', sans-serif);
+  font-size: 2.6rem;
+  font-weight: 700;
+  line-height: 1;
+  color: #f4fbff;
+  text-shadow: 0 2px 12px rgba(80, 180, 255, 0.45);
+}
+
+.deploy-sub {
+  margin-top: 0.45rem;
+  font-size: 0.78rem;
+  color: rgba(220, 235, 245, 0.88);
+  line-height: 1.35;
+}
+
+.deploy-bar {
+  margin-top: 0.7rem;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.deploy-bar > i {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #5ec8ff, #b8f0ff);
+  transition: width 0.2s ease;
+}
+
+.aim.dim .crosshair {
+  opacity: 0.35;
 }
 </style>

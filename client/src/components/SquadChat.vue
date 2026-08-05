@@ -124,7 +124,12 @@ const draft = ref('')
 const listEl = ref<HTMLElement | null>(null)
 const inputEl = ref<HTMLInputElement | null>(null)
 const maxLen = CHAT_TEXT_MAX
-const seenLen = ref(0)
+/** 仅统计队伍聊天未读；标记走左上广播，不亮红点 */
+const seenTeamLen = ref(0)
+
+function teamChatCount(msgs: SquadChatItem[]) {
+  return msgs.filter((m) => m.channel === 'team' && m.kind === 'chat').length
+}
 
 const visible = computed(() => {
   if (channel.value === 'team') {
@@ -133,13 +138,13 @@ const visible = computed(() => {
   return props.messages.filter((m) => m.channel === 'system' && m.kind === 'mark')
 })
 
-const unread = computed(() => Math.max(0, props.messages.length - seenLen.value))
+const unread = computed(() => Math.max(0, teamChatCount(props.messages) - seenTeamLen.value))
 
 function toggle() {
   open.value = !open.value
   if (open.value) {
     channel.value = 'team'
-    seenLen.value = props.messages.length
+    seenTeamLen.value = teamChatCount(props.messages)
     nextTick(() => {
       scrollBottom()
       inputEl.value?.focus()
@@ -197,13 +202,13 @@ watch(
 )
 
 watch(open, (v) => {
-  if (v) seenLen.value = props.messages.length
+  if (v) seenTeamLen.value = teamChatCount(props.messages)
 })
 
 watch(
-  () => props.messages.length,
+  () => teamChatCount(props.messages),
   (n) => {
-    if (open.value) seenLen.value = n
+    if (open.value) seenTeamLen.value = n
   }
 )
 

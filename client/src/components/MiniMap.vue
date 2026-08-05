@@ -232,8 +232,22 @@ const bigCanvasEl = ref<HTMLCanvasElement | null>(null)
 
 let miniRaf = 0
 let bigRaf = 0
+let bigPaintTimer = 0
 let lastMiniKey = ''
 let lastBigKey = ''
+/** 缩放/拖动手势中：禁止中途重绘地形，只更新 UI */
+let mapGesturing = false
+/** 防止上一次 paint 未完成又开新的（移动端主因卡死） */
+let bigPainting = false
+let bigPaintAgain = false
+let lastBigPaintAt = 0
+/** 展开大图时地形画布锚点；玩家走动只更新标记，不刷全图 */
+let paintAnchorX = 0
+let paintAnchorZ = 0
+
+function isCoarsePointer() {
+  return typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches
+}
 
 function fallbackSample(): MinimapSampleFn {
   return () => 'grass'
@@ -251,12 +265,37 @@ function scheduleMiniPaint() {
   })
 }
 
-function scheduleBigPaint() {
-  if (bigRaf) return
-  bigRaf = requestAnimationFrame(() => {
+function scheduleBigPaint(opts?: { urgent?: boolean; delay?: number }) {
+  if (!expanded.value) return
+  // 手势中不重绘地形（滑杆/捏合只动 zoom 数值）
+  if (mapGesturing && !opts?.urgent) return
+
+  if (bigRaf) {
+    cancelAnimationFrame(bigRaf)
     bigRaf = 0
+  }
+  if (bigPaintTimer) {
+    clearTimeout(bigPaintTimer)
+    bigPaintTimer = 0
+  }
+
+  const run = () => {
+    bigRaf = 0
+    bigPaintTimer = 0
+    if (mapGesturing && !opts?.urgent) return
     paintBig()
-  })
+  }
+
+  // 移动端：松手后再延迟一帧，先让滑杆/标记跟上，避免同步重绘卡死触摸
+  const delay = opts?.delay ?? (opts?.urgent && isCoarsePointer() ? 32 : 0)
+  if (delay > 0) {
+    bigPaintTimer = window.setTimeout(() => {
+      bigPaintTimer = 0
+      bigRaf = requestAnimationFrame(run)
+    }, delay)
+  } else {
+    bigRaf = requestAnimationFrame(run)
+  }
 }
 
 /** 缩放：1=最远俯瞰，ZOOM_MAX=最近 */
@@ -291,26 +330,53 @@ function paintMini() {
     centerZ: props.myZ,
     range: MINI_RANGE,
     sample: sampleAt,
-    maxSamples: 72,
+    maxSamples: 56,
   })
 }
 
 function paintBig() {
   const canvas = bigCanvasEl.value
   if (!canvas || !expanded.value) return
-  const qx = Math.round(centerX.value)
-  const qz = Math.round(centerZ.value)
-  const zr = Math.round(zoom.value * 20) / 20
+  if (bigPainting) {
+    bigPaintAgain = true
+    return
+  }
+  const coarse = isCoarsePointer()
+  // 移动端最短重绘间隔，防止连滑后排队卡死
+  const now = performance.now()
+  if (coarse && now - lastBigPaintAt < 180 && canvas.width > 0) {
+    bigPaintAgain = true
+    return
+  }
+  const cx = props.myX + panX.value
+  const cz = props.myZ + panZ.value
+  paintAnchorX = cx
+  paintAnchorZ = cz
+  const qx = Math.round(cx)
+  const qz = Math.round(cz)
+  const zr = Math.round(zoom.value * 12) / 12
   const key = `${qx},${qz},${zr},${props.terrainRev}`
   if (key === lastBigKey && canvas.width > 0) return
   lastBigKey = key
-  paintMinimapTerrain(canvas, {
-    centerX: centerX.value,
-    centerZ: centerZ.value,
-    range: viewRange.value,
-    sample: sampleAt,
-    maxSamples: zoom.value > 2.2 ? 160 : 128,
-  })
+  lastBigPaintAt = now
+  bigPainting = true
+  try {
+    paintMinimapTerrain(canvas, {
+      centerX: cx,
+      centerZ: cz,
+      range: viewRange.value,
+      sample: sampleAt,
+      maxSamples: coarse ? 48 : zoom.value > 2.2 ? 96 : 80,
+      quality: coarse ? 'low' : 'high',
+    })
+  } finally {
+    bigPainting = false
+    if (bigPaintAgain) {
+      bigPaintAgain = false
+      lastBigKey = ''
+      scheduleBigPaint({ urgent: true, delay: coarse ? 120 : 0 })
+    }
+  }
 }
 
 watch(
@@ -319,23 +385,37 @@ watch(
   { flush: 'post', immediate: true }
 )
 
+// 大图地形：跟缩放/拖移/挖放；玩家走动只在偏移够大时节流重绘（避免 10Hz 全图卡死）
 watch(
-  () =>
-    [expanded.value, centerX.value, centerZ.value, zoom.value, props.terrainRev] as const,
+  () => [expanded.value, panX.value, panZ.value, zoom.value, props.terrainRev] as const,
   async () => {
     if (!expanded.value) {
       lastBigKey = ''
       return
     }
+    if (mapGesturing) return
     await nextTick()
     scheduleBigPaint()
   },
   { flush: 'post' }
 )
 
+watch(
+  () => [props.myX, props.myZ] as const,
+  () => {
+    if (!expanded.value || mapGesturing) return
+    const dx = props.myX + panX.value - paintAnchorX
+    const dz = props.myZ + panZ.value - paintAnchorZ
+    if (dx * dx + dz * dz < 12 * 12) return
+    scheduleBigPaint({ delay: isCoarsePointer() ? 280 : 120 })
+  }
+)
+
 onUnmounted(() => {
   if (miniRaf) cancelAnimationFrame(miniRaf)
   if (bigRaf) cancelAnimationFrame(bigRaf)
+  if (bigPaintTimer) clearTimeout(bigPaintTimer)
+  endZoomDrag()
 })
 
 const myCellNum = computed(() => cellNumberAt(props.myX, props.myZ))
@@ -598,7 +678,11 @@ function setZoom(z: number, anchorWorld?: { x: number; z: number }) {
 }
 
 function bumpZoom(delta: number) {
+  mapGesturing = true
   setZoom(zoom.value + delta)
+  mapGesturing = false
+  lastBigKey = ''
+  scheduleBigPaint({ urgent: true, delay: isCoarsePointer() ? 48 : 0 })
 }
 
 function openMap() {
@@ -607,7 +691,10 @@ function openMap() {
   panX.value = 0
   panZ.value = 0
   lastBigKey = ''
-  nextTick(() => scheduleBigPaint())
+  mapGesturing = false
+  paintAnchorX = props.myX
+  paintAnchorZ = props.myZ
+  nextTick(() => scheduleBigPaint({ urgent: true }))
 }
 
 function clearAllLocalMarks() {
@@ -688,6 +775,7 @@ function onPointerMove(e: PointerEvent) {
   if (gesture.mode === 'pinch' && pointers.size >= 2) {
     const d = pinchDist()
     if (gesture.pinchDist0 > 0) {
+      mapGesturing = true
       setZoom(gesture.zoom0 * (d / gesture.pinchDist0))
     }
     return
@@ -700,6 +788,7 @@ function onPointerMove(e: PointerEvent) {
     gesture.mode = 'pan'
   }
   if (gesture.mode === 'pan' && zoom.value > 1.08) {
+    mapGesturing = true
     const el = bigFrameEl.value
     const w = el?.clientWidth || 1
     const h = el?.clientHeight || 1
@@ -717,6 +806,7 @@ function onPointerMove(e: PointerEvent) {
 
 function onPointerUp(e: PointerEvent) {
   const wasTap = gesture.mode === 'tap' && !gesture.moved && pointers.size <= 1
+  const wasGesture = mapGesturing || gesture.mode === 'pan' || gesture.mode === 'pinch'
   pointers.delete(e.pointerId)
 
   if (pointers.size >= 2) {
@@ -740,20 +830,90 @@ function onPointerUp(e: PointerEvent) {
     waypoint.value = worldAtUV(u, v)
   }
   gesture.mode = 'none'
+  if (wasGesture) {
+    mapGesturing = false
+    lastBigKey = ''
+    scheduleBigPaint({ urgent: true, delay: isCoarsePointer() ? 48 : 0 })
+  }
 }
 
 function onWheel(e: WheelEvent) {
   const { u, v } = localUV(e)
   const anchor = worldAtUV(u, v)
   const factor = e.deltaY > 0 ? 0.9 : 1.12
+  mapGesturing = true
   setZoom(zoom.value * factor, anchor)
+  mapGesturing = false
+  lastBigKey = ''
+  scheduleBigPaint({ urgent: true })
+}
+
+/** 滑杆拖动：全程不重绘，松手画一次（避免移动端卡死） */
+let zoomDragCleanup: (() => void) | null = null
+
+function endZoomDrag() {
+  zoomDragCleanup?.()
+  zoomDragCleanup = null
 }
 
 function onZoomTrack(e: PointerEvent) {
   const el = e.currentTarget as HTMLElement
-  const rect = el.getBoundingClientRect()
-  const t = 1 - (e.clientY - rect.top) / Math.max(rect.height, 1)
-  setZoom(ZOOM_MIN + Math.max(0, Math.min(1, t)) * (ZOOM_MAX - ZOOM_MIN))
+  endZoomDrag()
+  mapGesturing = true
+
+  let lastY = e.clientY
+  let done = false
+  const apply = (clientY: number) => {
+    // 移动端触摸抖动：忽略过小位移
+    if (Math.abs(clientY - lastY) < 1.5 && clientY !== e.clientY) return
+    lastY = clientY
+    const rect = el.getBoundingClientRect()
+    const t = 1 - (clientY - rect.top) / Math.max(rect.height, 1)
+    const next = ZOOM_MIN + Math.max(0, Math.min(1, t)) * (ZOOM_MAX - ZOOM_MIN)
+    if (Math.abs(next - zoom.value) < 0.02) return
+    zoom.value = clampZoom(next)
+    clampPan()
+  }
+
+  try {
+    el.setPointerCapture(e.pointerId)
+  } catch {
+    /* ignore */
+  }
+  apply(e.clientY)
+
+  const onMove = (ev: PointerEvent) => {
+    if (ev.pointerId !== e.pointerId) return
+    apply(ev.clientY)
+  }
+  const finish = (ev: PointerEvent) => {
+    if (ev.pointerId !== e.pointerId) return
+    if (done) return
+    done = true
+    endZoomDrag()
+    mapGesturing = false
+    lastBigKey = ''
+    scheduleBigPaint({ urgent: true, delay: isCoarsePointer() ? 48 : 0 })
+  }
+
+  // 挂到 window：手指滑出滑杆时仍能收到 up，避免 gesturing 卡死
+  window.addEventListener('pointermove', onMove, { passive: true })
+  window.addEventListener('pointerup', finish)
+  window.addEventListener('pointercancel', finish)
+  el.addEventListener('lostpointercapture', finish)
+  zoomDragCleanup = () => {
+    window.removeEventListener('pointermove', onMove)
+    window.removeEventListener('pointerup', finish)
+    window.removeEventListener('pointercancel', finish)
+    el.removeEventListener('lostpointercapture', finish)
+    try {
+      if (el.hasPointerCapture?.(e.pointerId)) {
+        el.releasePointerCapture(e.pointerId)
+      }
+    } catch {
+      /* ignore */
+    }
+  }
 }
 </script>
 
@@ -1157,6 +1317,7 @@ function onZoomTrack(e: PointerEvent) {
   width: 28px;
   flex-shrink: 0;
   padding: 0.1rem 0;
+  touch-action: none;
 }
 
 .zoom-btn {
@@ -1172,6 +1333,8 @@ function onZoomTrack(e: PointerEvent) {
   padding: 0;
   display: grid;
   place-items: center;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .zoom-track {
@@ -1182,6 +1345,8 @@ function onZoomTrack(e: PointerEvent) {
   background: rgba(255, 255, 255, 0.12);
   position: relative;
   cursor: pointer;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .zoom-thumb {

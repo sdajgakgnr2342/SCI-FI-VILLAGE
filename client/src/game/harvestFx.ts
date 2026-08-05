@@ -156,47 +156,112 @@ export class NotchOverlay {
   }
 }
 
-/** 石头裂纹加深 */
+/** 石头裂纹加深（细线裂纹，不用整面黑遮罩挡视线） */
+const _crackFrom = new THREE.Vector3(1, 0, 0)
+const _crackDir = new THREE.Vector3()
+
 export class CrackOverlay {
-  readonly mesh: THREE.Mesh
+  readonly group = new THREE.Group()
+  private lines: THREE.Mesh[] = []
+  private mat: THREE.MeshBasicMaterial
 
   constructor(private scene: THREE.Scene) {
-    const geo = new THREE.PlaneGeometry(0.95, 0.95)
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0x1a1a1a,
+    this.mat = new THREE.MeshBasicMaterial({
+      color: 0x0c0c0c,
       transparent: true,
-      opacity: 0.35,
-      side: THREE.DoubleSide,
+      opacity: 0.55,
       depthWrite: false,
+      depthTest: true,
+      toneMapped: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
     })
-    this.mesh = new THREE.Mesh(geo, mat)
-    this.mesh.visible = false
-    this.scene.add(this.mesh)
+    // 3 条细裂纹，避免整脸平面遮挡
+    for (let i = 0; i < 3; i++) {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), this.mat)
+      mesh.visible = false
+      mesh.renderOrder = 12
+      this.group.add(mesh)
+      this.lines.push(mesh)
+    }
+    this.group.visible = false
+    this.scene.add(this.group)
   }
 
-  showAt(x: number, y: number, z: number, face: { x: number; y: number; z: number }, stage: number) {
-    const op = 0.25 + Math.min(3, stage) * 0.2
-    ;(this.mesh.material as THREE.MeshBasicMaterial).opacity = op
-    this.mesh.position.set(
-      x + 0.5 + face.x * 0.51,
-      y + 0.5 + face.y * 0.51,
-      z + 0.5 + face.z * 0.51
-    )
-    this.mesh.lookAt(
-      x + 0.5 + face.x * 2,
-      y + 0.5 + face.y * 2,
-      z + 0.5 + face.z * 2
-    )
-    this.mesh.visible = true
+  showAt(
+    x: number,
+    y: number,
+    z: number,
+    face: { x: number; y: number; z: number },
+    stage: number,
+    /** 风格化石中心；缺省则用方块中心 */
+    pivot?: { x: number; y: number; z: number }
+  ) {
+    const s = Math.min(3, Math.max(1, stage))
+    this.mat.opacity = 0.35 + s * 0.18
+
+    const cx = pivot?.x ?? x + 0.5
+    const cy = pivot?.y ?? y + 0.5
+    const cz = pivot?.z ?? z + 0.5
+    const nx = face.x || 0
+    const ny = face.y || 0
+    const nz = face.z || 0
+    // 略浮出表面，贴合准星面
+    const ox = cx + nx * 0.28
+    const oy = cy + ny * 0.28
+    const oz = cz + nz * 0.28
+
+    // 面上的切向基
+    let tx = 0
+    let ty = 1
+    let tz = 0
+    if (Math.abs(ny) > 0.7) {
+      tx = 1
+      ty = 0
+      tz = 0
+    } else {
+      tx = -nz
+      ty = 0
+      tz = nx
+      const len = Math.hypot(tx, tz) || 1
+      tx /= len
+      tz /= len
+    }
+    const bx = ny * tz - nz * ty
+    const by = nz * tx - nx * tz
+    const bz = nx * ty - ny * tx
+
+    const specs = [
+      { u: 0, v: 0.02, len: 0.42 + s * 0.06, thick: 0.028, ang: 0.15 },
+      { u: 0.08, v: -0.1, len: 0.28 + s * 0.05, thick: 0.022, ang: -0.55 },
+      { u: -0.1, v: 0.12, len: 0.22 + s * 0.04, thick: 0.02, ang: 0.9 },
+    ]
+
+    for (let i = 0; i < this.lines.length; i++) {
+      const mesh = this.lines[i]
+      const sp = specs[i]
+      const ca = Math.cos(sp.ang)
+      const sa = Math.sin(sp.ang)
+      _crackDir.set(tx * ca + bx * sa, ty * ca + by * sa, tz * ca + bz * sa).normalize()
+      mesh.position.set(ox + tx * sp.u + bx * sp.v, oy + ty * sp.u + by * sp.v, oz + tz * sp.u + bz * sp.v)
+      mesh.scale.set(sp.len, sp.thick, sp.thick)
+      mesh.quaternion.setFromUnitVectors(_crackFrom, _crackDir)
+      mesh.visible = true
+    }
+    this.group.visible = true
   }
 
   hide() {
-    this.mesh.visible = false
+    this.group.visible = false
+    for (const m of this.lines) m.visible = false
   }
 
   dispose() {
-    this.scene.remove(this.mesh)
-    this.mesh.geometry.dispose()
-    ;(this.mesh.material as THREE.Material).dispose()
+    this.hide()
+    this.scene.remove(this.group)
+    for (const m of this.lines) m.geometry.dispose()
+    this.mat.dispose()
+    this.lines = []
   }
 }

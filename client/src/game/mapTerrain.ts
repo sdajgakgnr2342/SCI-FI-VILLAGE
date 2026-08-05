@@ -29,9 +29,15 @@ function tint(kind: MinimapKind, ix: number, iz: number): [number, number, numbe
   ]
 }
 
+/** 复用离屏画布与 ImageData，减轻移动端 GC */
+let offscreen: HTMLCanvasElement | null = null
+let cachedImg: ImageData | null = null
+let cachedSamples = 0
+const cellCache = new Map<number, MinimapKind>()
+
 /**
  * 将世界矩形画到 canvas（中心 + 边长 range 的俯视图）。
- * 采样分辨率按画布边长限制，大图也不会卡死。
+ * 格缓存 + 大步长时补探水，缩放拖动更跟手。
  */
 export function paintMinimapTerrain(
   canvas: HTMLCanvasElement,
@@ -40,15 +46,21 @@ export function paintMinimapTerrain(
     centerZ: number
     range: number
     sample: MinimapSampleFn
-    /** 最大采样边长（像素），默认 128 */
+    /** 最大采样边长（像素），默认 96 */
     maxSamples?: number
+    /** low：移动端少探水、低 dpr */
+    quality?: 'low' | 'high'
   }
 ) {
   const cssW = Math.max(1, Math.floor(canvas.clientWidth || canvas.width || 1))
   const cssH = Math.max(1, Math.floor(canvas.clientHeight || canvas.height || 1))
-  const maxS = opts.maxSamples ?? 128
+  const maxS = opts.maxSamples ?? 96
   const samples = Math.max(24, Math.min(maxS, Math.max(cssW, cssH)))
-  const dpr = Math.min(2, typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1)
+  const low = opts.quality === 'low'
+  const dpr = Math.min(
+    low ? 1 : 1.25,
+    typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
+  )
   const outW = Math.round(cssW * dpr)
   const outH = Math.round(cssH * dpr)
   if (canvas.width !== outW || canvas.height !== outH) {
@@ -61,18 +73,58 @@ export function paintMinimapTerrain(
 
   const half = opts.range / 2
   const step = opts.range / samples
-  const img = ctx.createImageData(samples, samples)
+  if (!cachedImg || cachedSamples !== samples) {
+    cachedImg = ctx.createImageData(samples, samples)
+    cachedSamples = samples
+  }
+  const img = cachedImg
   const data = img.data
   const x0 = opts.centerX - half
   const z0 = opts.centerZ - half
 
+  cellCache.clear()
+  const keyOf = (ix: number, iz: number) => ((ix + 0x20000) << 16) ^ (iz + 0x20000)
+  const sampleCell = (wx: number, wz: number): MinimapKind => {
+    const ix = Math.floor(wx)
+    const iz = Math.floor(wz)
+    const k = keyOf(ix, iz)
+    let kind = cellCache.get(k)
+    if (kind === undefined) {
+      kind = opts.sample(ix + 0.5, iz + 0.5)
+      cellCache.set(k, kind)
+    }
+    return kind
+  }
+
+  // 移动端只做十字探一次，避免 4 倍采样
+  const preferWater = !low && step > 0.85
+  const preferWaterLite = low && step > 1.1
+  const probe = step * 0.42
+
   for (let py = 0; py < samples; py++) {
     const wz = z0 + (py + 0.5) * step
-    const iz = Math.floor(wz)
     for (let px = 0; px < samples; px++) {
       const wx = x0 + (px + 0.5) * step
       const ix = Math.floor(wx)
-      const kind = opts.sample(wx, wz)
+      const iz = Math.floor(wz)
+      let kind = sampleCell(wx, wz)
+      if (preferWater && kind !== 'water') {
+        if (
+          sampleCell(wx + probe, wz) === 'water' ||
+          sampleCell(wx - probe, wz) === 'water' ||
+          sampleCell(wx, wz + probe) === 'water' ||
+          sampleCell(wx, wz - probe) === 'water'
+        ) {
+          kind = 'water'
+        }
+      } else if (preferWaterLite && kind !== 'water') {
+        if (
+          sampleCell(wx + probe, wz) === 'water' ||
+          sampleCell(wx, wz + probe) === 'water'
+        ) {
+          kind = 'water'
+        }
+      }
       const [r, g, b] = tint(kind, ix, iz)
       const i = (py * samples + px) * 4
       data[i] = r
@@ -82,15 +134,16 @@ export function paintMinimapTerrain(
     }
   }
 
-  // 先画到离屏再放大，避免马赛克过硬
-  const off = document.createElement('canvas')
-  off.width = samples
-  off.height = samples
-  const octx = off.getContext('2d')
+  if (!offscreen) offscreen = document.createElement('canvas')
+  if (offscreen.width !== samples || offscreen.height !== samples) {
+    offscreen.width = samples
+    offscreen.height = samples
+  }
+  const octx = offscreen.getContext('2d')
   if (!octx) return
   octx.putImageData(img, 0, 0)
 
   ctx.imageSmoothingEnabled = true
   ctx.imageSmoothingQuality = 'low'
-  ctx.drawImage(off, 0, 0, outW, outH)
+  ctx.drawImage(offscreen, 0, 0, outW, outH)
 }
