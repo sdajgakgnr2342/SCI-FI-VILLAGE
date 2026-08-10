@@ -366,7 +366,7 @@
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, onMounted, reactive, ref, watch, type Ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { GameEngine, SURFACE_Y } from '@/game/engine'
+import { GameEngine } from '@/game/engine'
 import { NpcManager } from '@/game/npcManager'
 import { PresenceClient } from '@/game/presence'
 import { RemotePlayerManager } from '@/game/remotePlayers'
@@ -1506,18 +1506,18 @@ onMounted(async () => {
     const sp = data.player
     const dropX = sp.x
     const dropZ = sp.z
-    const dropY = sp.y || SURFACE_Y + 2
+    const dropY = sp.y || engine.getGroundY(dropX, dropZ) + 0.02 + 1.62
     mapMe.x = dropX
     mapMe.z = dropZ
     mapMe.yaw = sp.yaw || 0
 
     deploying.value = true
-    deployRemain.value = 30
+    deployRemain.value = 10
     deployTimePct.value = 0
     engine.beginDeploy(
       { x: dropX, y: dropY, z: dropZ, yaw: sp.yaw, pitch: sp.pitch },
       {
-        durationSec: 30,
+        durationSec: 10,
         onProgress: (remain, timeProgress) => {
           deployRemain.value = remain
           deployTimePct.value = Math.round(Math.min(1, Math.max(0, timeProgress)) * 100)
@@ -1614,7 +1614,7 @@ onMounted(async () => {
       engine.camera,
       data.npcPolicy as import('@/api/server').NpcPolicy,
       {
-        standY: () => engine!.getNpcStandY(),
+        standY: (x, z) => engine!.getNpcStandY(x, z),
         walkable: (x, z) => engine!.isNpcWalkable(x, z),
         nearBuild: (x, z, r) => engine!.isPlayerStructureNear(x, z, r ?? 5),
       }

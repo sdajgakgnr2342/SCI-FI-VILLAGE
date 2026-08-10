@@ -6,9 +6,16 @@ export const ACTION_DURATION: Record<HarvestKind, number> = {
   dig: 0.3,
   build: 0.3,
   chop: 3,
-  /** 单块石头（与整棵树不同，需逐块开采） */
+  /** 小石默认；中/大石在 beginHarvest 里按 size 加长 */
   mine: 1.2,
   clear: 0.3,
+}
+
+/** 按石堆大小决定开采时长（一次采完整堆） */
+export function mineDurationForSize(size: number) {
+  if (size <= 1) return 0.9
+  if (size === 2) return 1.2
+  return 1.8
 }
 
 export function actionLabel(kind: HarvestKind | null): string {
@@ -52,27 +59,28 @@ export class DebrisParticles {
     outward?: THREE.Vector3
   ) {
     for (let i = 0; i < count; i++) {
-      const size = 0.04 + Math.random() * 0.07
+      // 扁片碎屑，避免大方块飘在身边像砖头
+      const size = 0.03 + Math.random() * 0.05
       const mesh = new THREE.Mesh(
-        new THREE.BoxGeometry(size, size * 0.6, size * 0.8),
+        new THREE.BoxGeometry(size, size * 0.35, size * 0.55),
         new THREE.MeshLambertMaterial({ color })
       )
       mesh.position.set(
-        x + (Math.random() - 0.5) * 0.4,
-        y + Math.random() * 0.3,
-        z + (Math.random() - 0.5) * 0.4
+        x + (Math.random() - 0.5) * 0.22,
+        y + Math.random() * 0.18,
+        z + (Math.random() - 0.5) * 0.22
       )
       const dir = outward
         ? outward.clone().normalize()
-        : new THREE.Vector3(Math.random() - 0.5, 0.6, Math.random() - 0.5).normalize()
-      const sp = 1.2 + Math.random() * 2.2
+        : new THREE.Vector3(Math.random() - 0.5, 0.55, Math.random() - 0.5).normalize()
+      const sp = 0.9 + Math.random() * 1.6
       this.group.add(mesh)
       this.items.push({
         mesh,
-        vx: dir.x * sp + (Math.random() - 0.5),
-        vy: 1.5 + Math.random() * 2.5,
-        vz: dir.z * sp + (Math.random() - 0.5),
-        life: 0.6 + Math.random() * 0.5,
+        vx: dir.x * sp + (Math.random() - 0.5) * 0.6,
+        vy: 1.1 + Math.random() * 1.8,
+        vz: dir.z * sp + (Math.random() - 0.5) * 0.6,
+        life: 0.45 + Math.random() * 0.4,
       })
     }
   }
@@ -109,56 +117,113 @@ export class DebrisParticles {
   }
 }
 
-/** 树干缺口（每砍一下加深 1/3） */
+/** 水平面朝向（砍面）；顶/底击中时退回默认前向 */
+function horizontalOutward(
+  face: { x: number; y: number; z: number },
+  fallback: { x: number; z: number } = { x: 0, z: 1 }
+) {
+  let nx = face.x
+  let nz = face.z
+  if (Math.abs(nx) + Math.abs(nz) < 0.01) {
+    nx = fallback.x
+    nz = fallback.z
+  }
+  const len = Math.hypot(nx, nz) || 1
+  return { x: nx / len, z: nz / len }
+}
+
+/**
+ * 树干斧口：贴合圆柱表面的 V 形缺口（两片斜面），不再用整格宽砖块。
+ */
 export class NotchOverlay {
-  readonly mesh: THREE.Mesh
+  readonly group = new THREE.Group()
+  private blades: THREE.Mesh[] = []
   private depth = 0
 
   constructor(private scene: THREE.Scene) {
-    const geo = new THREE.BoxGeometry(1.02, 0.28, 0.22)
     const mat = new THREE.MeshLambertMaterial({
-      color: 0x2a1810,
+      color: 0x1a0e08,
       transparent: true,
-      opacity: 0.92,
+      opacity: 0.94,
+      depthWrite: true,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
     })
-    this.mesh = new THREE.Mesh(geo, mat)
-    this.mesh.visible = false
-    this.scene.add(this.mesh)
+    for (let i = 0; i < 2; i++) {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), mat)
+      mesh.visible = false
+      mesh.renderOrder = 11
+      this.group.add(mesh)
+      this.blades.push(mesh)
+    }
+    this.group.visible = false
+    this.scene.add(this.group)
   }
 
-  /** stage 1..3 */
-  showAt(x: number, y: number, z: number, face: { x: number; y: number; z: number }, stage: number) {
+  /**
+   * stage 1..3；trunkR 与木柱半径一致。
+   * 缺口开在朝向玩家一侧的树皮上。
+   */
+  showAt(
+    x: number,
+    y: number,
+    z: number,
+    face: { x: number; y: number; z: number },
+    stage: number,
+    trunkR = 0.3
+  ) {
     this.depth = Math.min(3, Math.max(1, stage))
-    const inset = 0.15 + this.depth * 0.22
-    const h = 0.22 + this.depth * 0.06
-    this.mesh.scale.set(1, h / 0.28, inset / 0.22)
-    const nx = face.x || 0
-    const nz = face.z || (face.y !== 0 ? 1 : 0)
-    // 缺口嵌在朝向玩家的一侧
-    this.mesh.position.set(
-      x + 0.5 - nx * (0.5 - inset * 0.35),
-      y + 0.35,
-      z + 0.5 - nz * (0.5 - inset * 0.35)
-    )
-    this.mesh.rotation.set(0, Math.atan2(nx, nz), 0)
-    this.mesh.visible = true
+    const { x: nx, z: nz } = horizontalOutward(face)
+    const yaw = Math.atan2(nx, nz)
+
+    const cut = 0.05 + this.depth * 0.055
+    const span = 0.2 + this.depth * 0.03
+    const tall = 0.1 + this.depth * 0.035
+    const cx = x + 0.5 - nx * (trunkR - cut * 0.35)
+    const cy = y + 0.36
+    const cz = z + 0.5 - nz * (trunkR - cut * 0.35)
+
+    this.group.position.set(cx, cy, cz)
+    this.group.rotation.set(0, yaw, 0)
+
+    // 两片斜面组成 V：本地 -Z 为嵌入树干方向
+    const tilt = 0.38 + this.depth * 0.04
+    for (let i = 0; i < this.blades.length; i++) {
+      const mesh = this.blades[i]
+      const sign = i === 0 ? 1 : -1
+      mesh.scale.set(span, tall * 0.55, cut)
+      mesh.position.set(0, sign * tall * 0.22, cut * 0.15)
+      mesh.rotation.set(sign * tilt, 0, 0)
+      mesh.visible = true
+    }
+    this.group.visible = true
   }
 
   hide() {
-    this.mesh.visible = false
+    this.group.visible = false
     this.depth = 0
+    for (const m of this.blades) m.visible = false
   }
 
   dispose() {
-    this.scene.remove(this.mesh)
-    this.mesh.geometry.dispose()
-    ;(this.mesh.material as THREE.Material).dispose()
+    this.hide()
+    this.scene.remove(this.group)
+    for (const m of this.blades) {
+      m.geometry.dispose()
+      ;(m.material as THREE.Material).dispose()
+    }
+    this.blades = []
   }
 }
 
-/** 石头裂纹加深（细线裂纹，不用整面黑遮罩挡视线） */
-const _crackFrom = new THREE.Vector3(1, 0, 0)
+/** 石头表面裂纹：贴面细缝，避免粗棒穿出像树杈 */
+const _crackX = new THREE.Vector3()
+const _crackY = new THREE.Vector3()
+const _crackZ = new THREE.Vector3()
 const _crackDir = new THREE.Vector3()
+const _crackBitangent = new THREE.Vector3()
+const _crackBasis = new THREE.Matrix4()
 
 export class CrackOverlay {
   readonly group = new THREE.Group()
@@ -167,18 +232,17 @@ export class CrackOverlay {
 
   constructor(private scene: THREE.Scene) {
     this.mat = new THREE.MeshBasicMaterial({
-      color: 0x0c0c0c,
+      color: 0x121212,
       transparent: true,
-      opacity: 0.55,
+      opacity: 0.7,
       depthWrite: false,
       depthTest: true,
       toneMapped: false,
       polygonOffset: true,
-      polygonOffsetFactor: -2,
-      polygonOffsetUnits: -2,
+      polygonOffsetFactor: -3,
+      polygonOffsetUnits: -3,
     })
-    // 3 条细裂纹，避免整脸平面遮挡
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 4; i++) {
       const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), this.mat)
       mesh.visible = false
       mesh.renderOrder = 12
@@ -195,58 +259,82 @@ export class CrackOverlay {
     z: number,
     face: { x: number; y: number; z: number },
     stage: number,
-    /** 风格化石中心；缺省则用方块中心 */
-    pivot?: { x: number; y: number; z: number }
+    /** 风格化石视觉中心 */
+    pivot?: { x: number; y: number; z: number },
+    /** 表面外推距离（贴合石头外形） */
+    surfaceR = 0.4
   ) {
     const s = Math.min(3, Math.max(1, stage))
-    this.mat.opacity = 0.35 + s * 0.18
+    this.mat.opacity = 0.45 + s * 0.16
 
     const cx = pivot?.x ?? x + 0.5
-    const cy = pivot?.y ?? y + 0.5
+    const cy = pivot?.y ?? y + 0.45
     const cz = pivot?.z ?? z + 0.5
-    const nx = face.x || 0
-    const ny = face.y || 0
-    const nz = face.z || 0
-    // 略浮出表面，贴合准星面
-    const ox = cx + nx * 0.28
-    const oy = cy + ny * 0.28
-    const oz = cz + nz * 0.28
 
-    // 面上的切向基
-    let tx = 0
-    let ty = 1
-    let tz = 0
-    if (Math.abs(ny) > 0.7) {
-      tx = 1
-      ty = 0
-      tz = 0
-    } else {
-      tx = -nz
-      ty = 0
-      tz = nx
-      const len = Math.hypot(tx, tz) || 1
-      tx /= len
-      tz /= len
+    let nx = face.x
+    let ny = face.y
+    let nz = face.z
+    if (Math.abs(nx) + Math.abs(ny) + Math.abs(nz) < 0.01) {
+      nx = 0
+      ny = 0.35
+      nz = 1
     }
-    const bx = ny * tz - nz * ty
-    const by = nz * tx - nx * tz
-    const bz = nx * ty - ny * tx
+    // 开采时常见顶视/斜视：把法线抬一点，裂纹落在石头朝向玩家的鼓面
+    if (Math.abs(ny) > 0.85) {
+      const h = horizontalOutward(face, { x: 0, z: 1 })
+      nx = h.x * 0.75
+      ny = 0.45
+      nz = h.z * 0.75
+    }
+    const nlen = Math.hypot(nx, ny, nz) || 1
+    nx /= nlen
+    ny /= nlen
+    nz /= nlen
+
+    const lift = Math.max(0.12, surfaceR * 0.92)
+    const ox = cx + nx * lift
+    const oy = cy + ny * lift
+    const oz = cz + nz * lift
+
+    _crackZ.set(nx, ny, nz)
+    if (Math.abs(ny) < 0.9) _crackY.set(0, 1, 0)
+    else _crackY.set(1, 0, 0)
+    _crackX.crossVectors(_crackY, _crackZ).normalize()
+    _crackY.crossVectors(_crackZ, _crackX).normalize()
 
     const specs = [
-      { u: 0, v: 0.02, len: 0.42 + s * 0.06, thick: 0.028, ang: 0.15 },
-      { u: 0.08, v: -0.1, len: 0.28 + s * 0.05, thick: 0.022, ang: -0.55 },
-      { u: -0.1, v: 0.12, len: 0.22 + s * 0.04, thick: 0.02, ang: 0.9 },
+      { u: 0, v: 0, len: 0.34 + s * 0.08, thick: 0.016, ang: 0.12 },
+      { u: 0.06, v: -0.08, len: 0.22 + s * 0.05, thick: 0.013, ang: -0.7 },
+      { u: -0.08, v: 0.07, len: 0.18 + s * 0.04, thick: 0.012, ang: 0.95 },
+      { u: 0.02, v: 0.11, len: 0.14 + s * 0.03, thick: 0.01, ang: -1.15 },
     ]
 
     for (let i = 0; i < this.lines.length; i++) {
       const mesh = this.lines[i]
+      if (i >= specs.length) {
+        mesh.visible = false
+        continue
+      }
       const sp = specs[i]
       const ca = Math.cos(sp.ang)
       const sa = Math.sin(sp.ang)
-      _crackDir.set(tx * ca + bx * sa, ty * ca + by * sa, tz * ca + bz * sa).normalize()
-      mesh.position.set(ox + tx * sp.u + bx * sp.v, oy + ty * sp.u + by * sp.v, oz + tz * sp.u + bz * sp.v)
-      mesh.scale.set(sp.len, sp.thick, sp.thick)
-      mesh.quaternion.setFromUnitVectors(_crackFrom, _crackDir)
+      _crackDir
+        .set(
+          _crackX.x * ca + _crackY.x * sa,
+          _crackX.y * ca + _crackY.y * sa,
+          _crackX.z * ca + _crackY.z * sa
+        )
+        .normalize()
+      _crackBitangent.crossVectors(_crackZ, _crackDir).normalize()
+
+      mesh.position.set(
+        ox + _crackX.x * sp.u + _crackY.x * sp.v,
+        oy + _crackX.y * sp.u + _crackY.y * sp.v,
+        oz + _crackX.z * sp.u + _crackY.z * sp.v
+      )
+      _crackBasis.makeBasis(_crackDir, _crackBitangent, _crackZ)
+      mesh.quaternion.setFromRotationMatrix(_crackBasis)
+      mesh.scale.set(sp.len, sp.thick, 0.012)
       mesh.visible = true
     }
     this.group.visible = true

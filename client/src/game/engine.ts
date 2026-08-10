@@ -13,6 +13,7 @@ import {
 import {
   ACTION_DURATION,
   actionLabel,
+  mineDurationForSize,
   CrackOverlay,
   DebrisParticles,
   NotchOverlay,
@@ -65,7 +66,7 @@ const BLOCK_FACES: Record<
   sand: { top: 0xe8d7a5, side: 0xdccb90, bottom: 0xcfbe7c },
   water: { top: 0x3a7a9a, side: 0x2f6a88, bottom: 0x1a4a6a, opacity: 0.62 },
   stone: { top: 0x8a8e94, side: 0x7a7e84, bottom: 0x6a6e74 },
-  wood: { top: 0x6b4a2a, side: 0x5a3a1e, bottom: 0x4a2e14 },
+  wood: { top: 0xa87848, side: 0x916040, bottom: 0x7a4e28 },
   leaves: { top: 0x4fb844, side: 0x45a83c, bottom: 0x3a8f32 },
   shrub: { top: 0x8a9a3a, side: 0x7a8a30, bottom: 0x6a7a28 },
   plank: { top: 0xc4a06a, side: 0xb89058, bottom: 0xa88048 },
@@ -165,14 +166,17 @@ const FACES: {
   { dir: [0, 0, -1], corners: [[1, 0, 0], [0, 0, 0], [0, 1, 0], [1, 1, 0]], shade: 'side' },
 ]
 
-/** 地表高度：平坦草坪 */
+/** 基准地表高度（起伏中心）；兼容旧调用 / 建模预览 */
 export const SURFACE_Y = 4
-/** 树 / 石 / 灌木立在草皮之上的起始层（不替换地表草） */
-const FEATURE_Y = SURFACE_Y + 1
-/** 网格最高层（含树与建造）；天然特征远低于此，过高只浪费扫描 */
-const MESH_Y_MAX = SURFACE_Y + 16
-/** 天然树/石/灌木不会超过该高度 */
-const FEATURE_Y_MAX = FEATURE_Y + 8
+/** 起伏振幅（格）：略收一点，减少台阶侧面三角形 */
+const TERRAIN_AMP = 3
+/** 地表最低 / 最高（含溪谷下切） */
+const SURFACE_Y_MIN = 2
+const SURFACE_Y_MAX = 10
+/** 天然树/石相对地表的高度余量 */
+const FEATURE_HEADROOM = 10
+/** 网格扫描最高层（坡顶 + 树冠）；实际按 chunk 局部高度收窄 */
+const MESH_Y_MAX = SURFACE_Y_MAX + FEATURE_HEADROOM + 2
 /** 方块面外扩，消除跳起俯视时的光栅缝（负 inset = 沿法线外扩） */
 const FACE_SEAM_EXPAND = -0.005
 const CHUNK_SIZE = 16
@@ -180,12 +184,12 @@ const CHUNK_SIZE = 16
 const LOAD_RADIUS = 5
 /** 预取缓冲：可视外再挂 lod2，走路时提前建好 */
 const PRELOAD_RADIUS = 7
-/** 进服准备舱：落点周边加载圈（更大，倒计时用来铺开） */
-const DEPLOY_STREAM_RADIUS = 9
+/** 进服准备舱：落点周边加载圈（不宜过大，否则舱内建网格会严重卡顿） */
+const DEPLOY_STREAM_RADIUS = 6
 /** 卸载滞回：比预取更大，来回走不反复建拆 */
 const UNLOAD_RADIUS = 9
 /** 进服准备舱倒计时（秒） */
-const DEPLOY_DURATION_SEC = 30
+const DEPLOY_DURATION_SEC = 10
 /** 准备舱相对落点抬高 */
 const DEPLOY_PAD_HEIGHT = 42
 /** 准备舱可行走半宽（格） */
@@ -217,10 +221,33 @@ function hash2(x: number, z: number, seed: number) {
   return (n ^ (n >>> 16)) >>> 0
 }
 
-/** 无限平坦世界：草坪 + 土地，小溪横切；自然石头/树/灌木；overrides 记录挖放 */
+function smoothstep01(t: number) {
+  const x = Math.min(1, Math.max(0, t))
+  return x * x * (3 - 2 * x)
+}
+
+/** 双线性 value noise，返回 0..1 */
+function valueNoise2D(x: number, z: number, seed: number) {
+  const x0 = Math.floor(x)
+  const z0 = Math.floor(z)
+  const fx = x - x0
+  const fz = z - z0
+  const ux = smoothstep01(fx)
+  const uz = smoothstep01(fz)
+  const v00 = (hash2(x0, z0, seed) >>> 0) / 4294967295
+  const v10 = (hash2(x0 + 1, z0, seed) >>> 0) / 4294967295
+  const v01 = (hash2(x0, z0 + 1, seed) >>> 0) / 4294967295
+  const v11 = (hash2(x0 + 1, z0 + 1, seed) >>> 0) / 4294967295
+  const a = v00 + (v10 - v00) * ux
+  const b = v01 + (v11 - v01) * ux
+  return a + (b - a) * uz
+}
+
+/** 无限起伏世界：缓坡草坪 + 溪谷；自然石头/树/灌木；overrides 记录挖放 */
 export class InfiniteTerrain {
   readonly seed: number
   private overrides = new Map<string, BlockId>()
+  private heightCache = new Map<string, number>()
 
   constructor(seed = 42) {
     this.seed = seed
@@ -233,14 +260,72 @@ export class InfiniteTerrain {
     )
   }
 
+  creekDist(x: number, z: number) {
+    return Math.abs(z - this.creekCenterZ(x))
+  }
+
   isCreek(x: number, z: number) {
-    const d = Math.abs(z - this.creekCenterZ(x))
-    return d < 1.65
+    return this.creekDist(x, z) < 1.65
   }
 
   isCreekBank(x: number, z: number) {
-    const d = Math.abs(z - this.creekCenterZ(x))
+    const d = this.creekDist(x, z)
     return d >= 1.65 && d < 2.6
+  }
+
+  /**
+   * 该柱地表方块顶面整数 Y（草 / 水面所在格）。
+   * 多层噪声缓坡 + 溪谷下切，阶梯坡近似吃鸡起伏。
+   */
+  surfaceHeight(x: number, z: number): number {
+    const ix = Math.floor(x)
+    const iz = Math.floor(z)
+    const key = `${ix},${iz}`
+    const cached = this.heightCache.get(key)
+    if (cached !== undefined) return cached
+
+    const n =
+      valueNoise2D(ix * 0.018, iz * 0.018, this.seed ^ 0xa11) * 0.62 +
+      valueNoise2D(ix * 0.045, iz * 0.045, this.seed ^ 0xb22) * 0.28 +
+      valueNoise2D(ix * 0.11, iz * 0.11, this.seed ^ 0xc33) * 0.1
+    let h = SURFACE_Y + Math.round((n - 0.5) * 2 * TERRAIN_AMP)
+
+    // 溪谷：靠近水道逐渐下切，形成低洼水面
+    const d = this.creekDist(ix + 0.5, iz + 0.5)
+    if (d < 4.2) {
+      const t = 1 - d / 4.2
+      h -= Math.round(smoothstep01(t) * 2)
+    }
+
+    h = Math.max(SURFACE_Y_MIN, Math.min(SURFACE_Y_MAX, h))
+    if (this.heightCache.size > 24000) this.heightCache.clear()
+    this.heightCache.set(key, h)
+    return h
+  }
+
+  /** 树 / 石 / 灌木立在草皮之上的起始层 */
+  featureBaseY(x: number, z: number) {
+    return this.surfaceHeight(x, z) + 1
+  }
+
+  hasOverride(x: number, y: number, z: number) {
+    return this.overrides.has(blockKey(Math.floor(x), Math.floor(y), Math.floor(z)))
+  }
+
+  /** 本 chunk 地表高度范围，用于收窄网格扫描 */
+  chunkSurfaceRange(cx: number, cz: number): { minSy: number; maxSy: number } {
+    const x0 = cx * CHUNK_SIZE
+    const z0 = cz * CHUNK_SIZE
+    let minSy = SURFACE_Y_MAX
+    let maxSy = SURFACE_Y_MIN
+    for (let z = z0; z < z0 + CHUNK_SIZE; z++) {
+      for (let x = x0; x < x0 + CHUNK_SIZE; x++) {
+        const sy = this.surfaceHeight(x, z)
+        if (sy < minSy) minSy = sy
+        if (sy > maxSy) maxSy = sy
+      }
+    }
+    return { minSy, maxSy }
   }
 
   sample(x: number, y: number, z: number): BlockId {
@@ -251,44 +336,32 @@ export class InfiniteTerrain {
     if (o !== undefined) return o
 
     if (iy < 0) return 'dirt'
-    // 天然特征之上：无程序方块（玩家放置已走 overrides）
-    if (iy > FEATURE_Y_MAX) return 'air'
-    // 地表以下无特征，省掉 tree/rock 扫描
-    if (iy < FEATURE_Y) {
-      if (iy > SURFACE_Y) return 'air'
-      if (this.isCreek(ix, iz)) {
-        if (iy < SURFACE_Y) return 'dirt'
-        return 'water'
-      }
-      if (iy < SURFACE_Y) return 'dirt'
-      return 'grass'
-    }
+
+    const sy = this.surfaceHeight(ix, iz)
+    const featMax = sy + 1 + FEATURE_HEADROOM
+    if (iy > featMax) return 'air'
 
     const creek = this.isCreek(ix, iz)
     const bank = this.isCreekBank(ix, iz)
 
-    if (!creek && !bank) {
+    // 地表之上：天然特征（树石灌木）
+    if (iy > sy && !creek && !bank) {
       const feat = this.featureBlock(ix, iy, iz)
       if (feat) return feat
     }
 
-    if (iy > SURFACE_Y) return 'air'
-
-    if (creek) {
-      if (iy < SURFACE_Y) return 'dirt'
-      if (iy === SURFACE_Y) return 'water'
-      return 'air'
+    if (iy < sy) return 'dirt'
+    if (iy === sy) {
+      if (creek) return 'water'
+      return 'grass'
     }
-
-    // 溪岸：草地可走到水边（无沙岸挡条），仍禁树木等大型特征
-    if (iy < SURFACE_Y) return 'dirt'
-    if (iy === SURFACE_Y) return 'grass'
     return 'air'
   }
 
   private featureBlock(ix: number, iy: number, iz: number): BlockId | null {
-    if (iy < FEATURE_Y || iy > FEATURE_Y_MAX) return null
-    if (iy === FEATURE_Y) {
+    const feat = this.featureBaseY(ix, iz)
+    if (iy < feat || iy > feat + FEATURE_HEADROOM) return null
+    if (iy === feat) {
       const h = hash2(ix, iz, this.seed ^ 0x51)
       if (h % 47 === 0 && !this.nearTreeTrunk(ix, iz) && !this.nearRock(ix, iz, 2)) {
         return 'shrub'
@@ -333,10 +406,11 @@ export class InfiniteTerrain {
         if (!this.isTreeSeed(tx, tz)) continue
         const h = hash2(tx, tz, this.seed ^ 0x11)
         const trunkH = 4 + (h % 3)
-        // 树干从草皮之上开始，不替换地表草方块
-        const top = FEATURE_Y + trunkH
+        const feat = this.featureBaseY(tx, tz)
+        // 树干从该柱草皮之上开始，不替换地表草方块
+        const top = feat + trunkH
 
-        if (dx === 0 && dz === 0 && iy >= FEATURE_Y && iy < top) return 'wood'
+        if (dx === 0 && dz === 0 && iy >= feat && iy < top) return 'wood'
 
         // 2～3 根侧枝：托住树冠，避免叶子悬空
         const branch = this.treeBranchOffset(h, dx, dz, iy, top)
@@ -399,11 +473,11 @@ export class InfiniteTerrain {
   }
 
   /**
-   * 天然石堆外观锚点：种子格在草皮之上（FEATURE_Y）返回尺寸。
+   * 天然石堆外观锚点：种子格在草皮之上返回尺寸。
    * 其它天然石格应跳过方块出面（由锚点画整坨风格化石）。
    */
   naturalRockAnchorSize(x: number, y: number, z: number): number | null {
-    if (y !== FEATURE_Y) return null
+    if (y !== this.featureBaseY(x, z)) return null
     if (this.get(x, y, z) !== 'stone') return null
     const o = this.overrides.get(blockKey(x, y, z))
     if (o !== undefined) return null // 玩家改过的格不当天然锚点
@@ -421,16 +495,18 @@ export class InfiniteTerrain {
   }
 
   private rockAt(ix: number, iy: number, iz: number): BlockId | null {
-    if (iy < FEATURE_Y || iy > FEATURE_Y + 3) return null
     for (let dz = -3; dz <= 3; dz++) {
       for (let dx = -3; dx <= 3; dx++) {
-        const info = this.rockSeedInfo(ix - dx, iz - dz)
+        const sx = ix - dx
+        const sz = iz - dz
+        const info = this.rockSeedInfo(sx, sz)
         if (!info) continue
+        const feat = this.featureBaseY(sx, sz)
         const { size } = info
         const maxR = size === 1 ? 0 : 1
         const maxH = size
         if (Math.abs(dx) > maxR || Math.abs(dz) > maxR) continue
-        const localY = iy - FEATURE_Y
+        const localY = iy - feat
         if (localY < 0 || localY >= maxH) continue
         if (size >= 3 && localY >= 2 && Math.abs(dx) + Math.abs(dz) > 0) continue
         if (size === 2 && localY >= 1 && Math.abs(dx) + Math.abs(dz) > 1) continue
@@ -451,10 +527,11 @@ export class InfiniteTerrain {
   minimapKind(x: number, z: number): MinimapKind {
     const ix = Math.floor(x)
     const iz = Math.floor(z)
+    const sy = this.surfaceHeight(ix, iz)
     const hasOverrides = this.overrides.size > 0
 
     if (hasOverrides) {
-      const oSurf = this.overrides.get(blockKey(ix, SURFACE_Y, iz))
+      const oSurf = this.overrides.get(blockKey(ix, sy, iz))
       if (oSurf !== undefined) {
         if (oSurf === 'water') return 'water'
         if (oSurf === 'sand') return 'sand'
@@ -478,7 +555,7 @@ export class InfiniteTerrain {
     if (cd < 3.05) return 'sand'
 
     if (hasOverrides) {
-      const oAbove = this.overrides.get(blockKey(ix, SURFACE_Y + 1, iz))
+      const oAbove = this.overrides.get(blockKey(ix, sy + 1, iz))
       if (oAbove !== undefined && oAbove !== 'air' && oAbove !== 'leaves' && oAbove !== 'water') {
         if (oAbove === 'shrub') return 'shrub'
         if (oAbove === 'stone' || oAbove === 'rubble' || oAbove === 'alloy') return 'stone'
@@ -543,11 +620,12 @@ export class InfiniteTerrain {
   looksLikePlayerBuild(ix: number, iz: number): boolean {
     const x = Math.floor(ix)
     const z = Math.floor(iz)
-    for (let y = SURFACE_Y; y <= SURFACE_Y + 12; y++) {
+    const sy = this.surfaceHeight(x, z)
+    for (let y = sy; y <= sy + 12; y++) {
       const o = this.overrides.get(blockKey(x, y, z))
       if (o === undefined || o === 'air' || o === 'water' || o === 'leaves') continue
       if (o === 'plank' || o === 'turf') return true
-      if (y >= SURFACE_Y + 1) return true
+      if (y >= sy + 1) return true
     }
     return false
   }
@@ -667,6 +745,33 @@ export class InfiniteTerrain {
   }
 
   /**
+   * 开采用：整块岩石占用的全部格。
+   * 天然石返回种子展开的完整占地（含已挖空的格也要盖 air，避免幽灵石）；
+   * 放置石返回连通分量。
+   */
+  allRockCellsAt(x: number, y: number, z: number): { x: number; y: number; z: number }[] | null {
+    const hx = Math.floor(x)
+    const hy = Math.floor(y)
+    const hz = Math.floor(z)
+    if (this.get(hx, hy, hz) !== 'stone') return null
+
+    for (let dz = -3; dz <= 3; dz++) {
+      for (let dx = -3; dx <= 3; dx++) {
+        const sx = hx - dx
+        const sz = hz - dz
+        const info = this.rockSeedInfo(sx, sz)
+        if (!info) continue
+        const cells = this.enumerateRock(sx, sz, info.size)
+        if (cells.some((c) => c.x === hx && c.y === hy && c.z === hz)) {
+          return cells
+        }
+      }
+    }
+
+    return this.rockCellsAt(hx, hy, hz)
+  }
+
+  /**
    * 石头高亮/外观应对齐的绘制点：天然石用种子格；放置石堆用几何中心。
    */
   rockDrawInfo(
@@ -701,6 +806,7 @@ export class InfiniteTerrain {
 
   private enumerateRock(sx: number, sz: number, size: number) {
     const cells: { x: number; y: number; z: number }[] = []
+    const feat = this.featureBaseY(sx, sz)
     const maxR = size === 1 ? 0 : 1
     const maxH = size
     for (let dz = -maxR; dz <= maxR; dz++) {
@@ -708,7 +814,7 @@ export class InfiniteTerrain {
         for (let localY = 0; localY < maxH; localY++) {
           if (size >= 3 && localY >= 2 && Math.abs(dx) + Math.abs(dz) > 0) continue
           if (size === 2 && localY >= 1 && Math.abs(dx) + Math.abs(dz) > 1) continue
-          cells.push({ x: sx + dx, y: FEATURE_Y + localY, z: sz + dz })
+          cells.push({ x: sx + dx, y: feat + localY, z: sz + dz })
         }
       }
     }
@@ -1473,7 +1579,7 @@ function pushStylizedRock(
   const sz = base * (0.85 + ((h >> 8) % 14) / 100)
   const cx = x + 0.5
   const cz = z + 0.5
-  // 底部贴草地顶（y 为 FEATURE_Y / 石堆底格），略埋一点更稳
+  // 底部贴草地顶（y 为石堆底格 / featureBaseY），略埋一点更稳
   const cy = y + sy * 0.55
 
   let v = pushRockBlob(pos, nor, col, idx, vertex, cx, cy, cz, sx, sy, sz, yaw, h, tmp)
@@ -1989,6 +2095,181 @@ function pushCreekEdgeStones(
   return v
 }
 
+/**
+ * 邻格是否挡住本格这一面。
+ * 树干/叶/灌木/天然石是造型物，不占满整格，不能当实心遮挡（否则草坪侧面会被错误裁掉变「透明」）。
+ */
+function neighborOccludesFace(
+  world: InfiniteTerrain,
+  nx: number,
+  ny: number,
+  nz: number,
+  neighbor: BlockId
+) {
+  if (neighbor === 'air' || neighbor === 'water') return false
+  if (neighbor === 'leaves' || neighbor === 'shrub' || neighbor === 'wood') return false
+  // 天然石无 override；玩家放置的石头有 override，才当实心遮挡
+  if (neighbor === 'stone' && !world.hasOverride(nx, ny, nz)) return false
+  return true
+}
+
+/**
+ * 可贪婪合并的实心建造方块。
+ * 不含 grass/turf：侧面要「薄绿皮 + 大块泥土」分层，不能并成纯色大面。
+ * 天然石仍走风格化路径。
+ */
+const GREEDY_SOLID: ReadonlySet<BlockId> = new Set([
+  'plank',
+  'dirt',
+  'sand',
+  'thatch',
+  'alloy',
+  'stone',
+])
+
+function isGreedySolidCell(world: InfiniteTerrain, id: BlockId, x: number, y: number, z: number) {
+  if (!GREEDY_SOLID.has(id)) return false
+  // 天然石堆仍用风格化网格，不进贪婪方块面
+  if (id === 'stone' && world.isNaturalStone(x, y, z)) return false
+  return true
+}
+
+/**
+ * 对实心方块做 6 向贪婪网格。
+ * lod≥1 时跳过底面；y 范围按 chunk 地表收窄。
+ */
+function pushGreedySolidQuads(
+  world: InfiniteTerrain,
+  cx: number,
+  cz: number,
+  lod: ChunkLod,
+  pos: number[],
+  nor: number[],
+  col: number[],
+  idx: number[],
+  vertex: number,
+  tmp: THREE.Color,
+  yMin: number,
+  yMax: number
+) {
+  const x0 = cx * CHUNK_SIZE
+  const z0 = cz * CHUNK_SIZE
+  const dims = [CHUNK_SIZE, yMax - yMin + 1, CHUNK_SIZE]
+  const origin = [x0, yMin, z0]
+  let v = vertex
+
+  const dirs: { axis: 0 | 1 | 2; sign: 1 | -1; shade: 'top' | 'side' | 'bottom' }[] = [
+    { axis: 0, sign: 1, shade: 'side' },
+    { axis: 0, sign: -1, shade: 'side' },
+    { axis: 1, sign: 1, shade: 'top' },
+    { axis: 1, sign: -1, shade: 'bottom' },
+    { axis: 2, sign: 1, shade: 'side' },
+    { axis: 2, sign: -1, shade: 'side' },
+  ]
+
+  // 复用 mask，避免每片 new Array
+  let mask: (BlockId | null)[] = []
+
+  for (const dir of dirs) {
+    if (lod >= 1 && dir.shade === 'bottom') continue
+
+    const uA = ((dir.axis + 1) % 3) as 0 | 1 | 2
+    const vA = ((dir.axis + 2) % 3) as 0 | 1 | 2
+    const sliceCount = dims[dir.axis]
+    const uSize = dims[uA]
+    const vSize = dims[vA]
+    const maskLen = uSize * vSize
+    if (mask.length < maskLen) mask = new Array(maskLen)
+
+    for (let slice = 0; slice < sliceCount; slice++) {
+      for (let i = 0; i < maskLen; i++) mask[i] = null
+
+      for (let vv = 0; vv < vSize; vv++) {
+        for (let uu = 0; uu < uSize; uu++) {
+          const coord = [0, 0, 0]
+          coord[dir.axis] = slice
+          coord[uA] = uu
+          coord[vA] = vv
+          const x = origin[0] + coord[0]
+          const y = origin[1] + coord[1]
+          const z = origin[2] + coord[2]
+          const id = world.get(x, y, z)
+          if (!isGreedySolidCell(world, id, x, y, z)) continue
+          const nx = x + (dir.axis === 0 ? dir.sign : 0)
+          const ny = y + (dir.axis === 1 ? dir.sign : 0)
+          const nz = z + (dir.axis === 2 ? dir.sign : 0)
+          const neighbor = world.get(nx, ny, nz)
+          if (neighborOccludesFace(world, nx, ny, nz, neighbor)) continue
+          mask[uu + vv * uSize] = id
+        }
+      }
+
+      let n = 0
+      while (n < maskLen) {
+        const id = mask[n]
+        if (id == null) {
+          n++
+          continue
+        }
+        const uu = n % uSize
+        const vv = (n / uSize) | 0
+        let w = 1
+        while (uu + w < uSize && mask[n + w] === id) w++
+        let h = 1
+        grow: while (vv + h < vSize) {
+          for (let k = 0; k < w; k++) {
+            if (mask[uu + k + (vv + h) * uSize] !== id) break grow
+          }
+          h++
+        }
+        for (let dv = 0; dv < h; dv++) {
+          for (let du = 0; du < w; du++) {
+            mask[uu + du + (vv + dv) * uSize] = null
+          }
+        }
+
+        const palette = BLOCK_FACES[id as Exclude<BlockId, 'air'>]
+        tmp.setHex(palette[dir.shade])
+        if (dir.shade === 'side') tmp.multiplyScalar(0.94)
+        if (dir.shade === 'bottom') tmp.multiplyScalar(0.8)
+
+        const plane = origin[dir.axis] + slice + (dir.sign > 0 ? 1 : 0)
+        const corners: [number, number, number][] = [
+          [0, 0, 0],
+          [0, 0, 0],
+          [0, 0, 0],
+          [0, 0, 0],
+        ]
+        const put = (i: number, u: number, vLoc: number) => {
+          const p: [number, number, number] = [0, 0, 0]
+          p[dir.axis] = plane
+          p[uA] = origin[uA] + u
+          p[vA] = origin[vA] + vLoc
+          corners[i] = p
+        }
+        // 与 FACES 同向，保证光照法线朝外
+        if (dir.sign > 0) {
+          put(0, uu, vv)
+          put(1, uu + w, vv)
+          put(2, uu + w, vv + h)
+          put(3, uu, vv + h)
+        } else {
+          put(0, uu, vv + h)
+          put(1, uu + w, vv + h)
+          put(2, uu + w, vv)
+          put(3, uu, vv)
+        }
+
+        const normal: [number, number, number] = [0, 0, 0]
+        normal[dir.axis] = dir.sign
+        v = pushFaceQuad(pos, nor, col, idx, v, corners, [0, 0, 0], normal, tmp, 0, FACE_SEAM_EXPAND)
+        n++
+      }
+    }
+  }
+  return v
+}
+
 /** 供建模预览等外部使用；lod 默认近景全密度 */
 export function buildChunkMeshes(
   world: InfiniteTerrain,
@@ -2020,8 +2301,10 @@ export function buildChunkMeshes(
   let grassV = 0
 
   const tmp = new THREE.Color()
-  const yMin = 0
-  const yMax = MESH_Y_MAX
+  // 按本 chunk 地表收窄 Y：起伏后若仍扫 0..MESH_Y_MAX，CPU 会暴涨
+  const { minSy, maxSy } = world.chunkSurfaceRange(cx, cz)
+  const yMin = Math.max(0, minSy - 1)
+  const yMax = Math.min(MESH_Y_MAX, maxSy + 1 + FEATURE_HEADROOM)
 
   for (let z = z0; z < z1; z++) {
     for (let x = x0; x < x1; x++) {
@@ -2099,61 +2382,38 @@ export function buildChunkMeshes(
           )
         }
 
+        // 自然草：卡片草单独层；方块面走下方分层侧面（上绿下土）
+        if (id === 'grass' && world.get(x, y + 1, z) === 'air') {
+          grassV = pushGrassCards(grassPos, grassNor, grassUv, grassIdx, grassV, x, y, z, lod)
+        }
+        if (isGreedySolidCell(world, id, x, y, z)) continue
+
         // 灌木：枝干 + 草叶（跳过方块面）
         if (id === 'shrub') {
           solidV = pushStylizedShrub(solidPos, solidNor, solidCol, solidIdx, solidV, x, y, z, lod, tmp)
           continue
         }
 
-        // 石头：天然锚点 / 放置石堆各画一次风格化组合石（跟随格跳过）
+        // 石头：仅天然石堆用风格化组合石；玩家放置的石头走方块贪婪网格
         if (id === 'stone') {
           if (world.isNaturalRockFollower(x, y, z)) continue
-          let size = world.naturalRockAnchorSize(x, y, z)
-          let drawX = x
-          let drawY = y
-          let drawZ = z
-          if (size == null) {
-            const cells = world.rockCellsAt(x, y, z)
-            if (!cells?.length) continue
-            let best = cells[0]
-            for (const c of cells) {
-              if (
-                c.y < best.y ||
-                (c.y === best.y && (c.x < best.x || (c.x === best.x && c.z < best.z)))
-              ) {
-                best = c
-              }
-            }
-            if (best.x !== x || best.y !== y || best.z !== z) continue
-            size = cells.length <= 1 ? 1 : cells.length <= 4 ? 2 : 3
-            // 石堆几何中心，避免画在边角格
-            let sx = 0
-            let sy = 0
-            let sz = 0
-            for (const c of cells) {
-              sx += c.x
-              sy += c.y
-              sz += c.z
-            }
-            const n = cells.length
-            drawX = sx / n
-            drawY = sy / n
-            drawZ = sz / n
+          const size = world.naturalRockAnchorSize(x, y, z)
+          if (size != null) {
+            solidV = pushStylizedRock(
+              solidPos,
+              solidNor,
+              solidCol,
+              solidIdx,
+              solidV,
+              x,
+              y,
+              z,
+              size,
+              tmp,
+              lod
+            )
+            continue
           }
-          solidV = pushStylizedRock(
-            solidPos,
-            solidNor,
-            solidCol,
-            solidIdx,
-            solidV,
-            drawX,
-            drawY,
-            drawZ,
-            size,
-            tmp,
-            lod
-          )
-          continue
         }
 
         // 树叶：弯曲叶瓣（表面更密，内部也补密度）
@@ -2200,20 +2460,15 @@ export function buildChunkMeshes(
 
         for (const face of FACES) {
           const [dx, dy, dz] = face.dir
-          const neighbor = world.get(x + dx, y + dy, z + dz)
+          const nx = x + dx
+          const ny = y + dy
+          const nz = z + dz
+          const neighbor = world.get(nx, ny, nz)
           if (isWater) {
             // 只对空气出面，靠透明度透出河床与岸壁颜色
             if (neighbor !== 'air') continue
-          } else if (neighbor !== 'air' && neighbor !== 'water') {
-            // 草皮顶面：树/石/叶/灌木立在其上时仍出顶面，避免镂空露天
-            const propOnGrass =
-              (id === 'grass' || id === 'turf') &&
-              face.shade === 'top' &&
-              (neighbor === 'wood' ||
-                neighbor === 'stone' ||
-                neighbor === 'leaves' ||
-                neighbor === 'shrub')
-            if (!propOnGrass) continue
+          } else if (neighborOccludesFace(world, nx, ny, nz, neighbor)) {
+            continue
           }
 
           const pos = isWater ? waterPos : solidPos
@@ -2223,6 +2478,7 @@ export function buildChunkMeshes(
           const yBias = isWater && face.shade === 'top' ? -0.08 : 0
 
           if ((id === 'grass' || id === 'turf') && face.shade === 'side') {
+            // 侧面：薄绿皮 + 大块泥土（不走贪婪，避免整面纯绿）
             tmp.setHex(GRASS_SIDE_DIRT).multiplyScalar(0.94)
             solidV = pushFaceQuad(
               solidPos,
@@ -2251,6 +2507,11 @@ export function buildChunkMeshes(
               0,
               FACE_SEAM_EXPAND
             )
+            continue
+          }
+
+          // 远景草坪底面可省
+          if ((id === 'grass' || id === 'turf') && face.shade === 'bottom' && lod >= 1) {
             continue
           }
 
@@ -2295,17 +2556,24 @@ export function buildChunkMeshes(
             )
           }
         }
-
-        // 草坪：卡片草（单独层，alphaTest）
-        if (
-          (id === 'grass' || id === 'turf') &&
-          world.get(x, y + 1, z) === 'air'
-        ) {
-          grassV = pushGrassCards(grassPos, grassNor, grassUv, grassIdx, grassV, x, y, z, lod)
-        }
       }
     }
   }
+
+  solidV = pushGreedySolidQuads(
+    world,
+    cx,
+    cz,
+    lod,
+    solidPos,
+    solidNor,
+    solidCol,
+    solidIdx,
+    solidV,
+    tmp,
+    yMin,
+    yMax
+  )
 
   const make = (
     positions: number[],
@@ -2444,7 +2712,7 @@ class CreekFlowParticles {
       const rx = -tangZ / len
       const rz = 0.35 / len
       this.positions[i * 3] = d.x + rx * d.offset
-      this.positions[i * 3 + 1] = SURFACE_Y + 0.05
+      this.positions[i * 3 + 1] = world.surfaceHeight(d.x, cz + rz * d.offset) + 0.05
       this.positions[i * 3 + 2] = cz + rz * d.offset
     }
   }
@@ -2472,7 +2740,8 @@ class CreekFlowParticles {
       const wobble = Math.sin(this.time * 1.6 + d.phase) * 0.04
       const off = d.offset + wobble
       this.positions[i * 3] = d.x + rx * off
-      this.positions[i * 3 + 1] = SURFACE_Y + 0.048 + Math.sin(this.time * 2.2 + d.phase) * 0.01
+      this.positions[i * 3 + 1] =
+        world.surfaceHeight(d.x, cz + rz * off) + 0.048 + Math.sin(this.time * 2.2 + d.phase) * 0.01
       this.positions[i * 3 + 2] = cz + rz * off
     }
     const attr = this.points.geometry.getAttribute('position') as THREE.BufferAttribute
@@ -2626,6 +2895,10 @@ export class GameEngine {
     dest: { x: number; y: number; z: number; yaw: number; pitch: number }
     remain: number
     duration: number
+    /** 墙上时钟结束时刻（ms），读秒不跟帧卡顿/铺图进度挂钩 */
+    endsAt: number
+    /** 上次推 UI 的时刻，节流 onProgress */
+    lastUiAt: number
     onProgress?: (remain: number, timeProgress: number) => void
     onComplete?: () => void
   } | null = null
@@ -2634,9 +2907,10 @@ export class GameEngine {
   private static readonly IDLE_MOUNT_MAX = 2
   /** 单帧建网格时间预算（ms），超出则本帧不再挂/重建 */
   private static readonly MESH_BUDGET_MS = 5.5
-  /** 准备舱期间每帧多挂几块 */
-  private static readonly DEPLOY_MOUNT_PER_FRAME = 5
-  private static readonly DEPLOY_MESH_BUDGET_MS = 12
+  /** 准备舱：每帧少挂、严控预算，优先保证读秒流畅 */
+  private static readonly DEPLOY_MOUNT_PER_FRAME = 2
+  private static readonly DEPLOY_MESH_BUDGET_MS = 6.5
+  private static readonly DEPLOY_FORCE_MOUNT = 3
   private keys = new Set<string>()
   private yaw = 0
   private pitch = -0.28
@@ -2861,7 +3135,11 @@ export class GameEngine {
         const dist = Math.max(Math.abs(dx), Math.abs(dz))
         const visible = r2 <= loadR2
         // 可视内按距离 LOD；缓冲环只挂 lod2，且不因离开可视而降级重建
-        const wantLod: ChunkLod = visible ? chunkLodFromDist(dist) : 2
+        let wantLod: ChunkLod = visible ? chunkLodFromDist(dist) : 2
+        // 准备舱：强制更粗 LOD，避免脚下近景全密度建树叶/草把主线程打爆
+        if (deploying) {
+          wantLod = (dist <= 2 ? 1 : 2) as ChunkLod
+        }
         const existing = this.chunks.get(key)
         if (!existing) {
           const ahead = dx * this.moveHintX + dz * this.moveHintZ
@@ -2882,8 +3160,8 @@ export class GameEngine {
       this.enqueueMount(p.cx, p.cz, p.lod)
     }
     if (force) {
-      // 出生点：先立刻铺满脚下近景，其余进队列
-      this.flushMountQueue(deploying ? 16 : 12)
+      // 出生/进舱：有限冲刷，始终走时间预算，禁止一帧挂十几个
+      this.flushMountQueue(deploying ? GameEngine.DEPLOY_FORCE_MOUNT : 8)
     }
 
     for (const [key, meshes] of this.chunks) {
@@ -2939,10 +3217,10 @@ export class GameEngine {
     const t0 = performance.now()
     const deploying = Boolean(this.deploy?.active)
     const budget = deploying ? GameEngine.DEPLOY_MESH_BUDGET_MS : GameEngine.MESH_BUDGET_MS
-    const useBudget = limit <= (deploying ? 8 : 4)
     let n = 0
     while (this.mountQueue.length && n < limit) {
-      if (useBudget && n > 0 && performance.now() - t0 > budget) break
+      // 始终限时：准备舱强制冲刷也不能把帧打爆
+      if (n > 0 && performance.now() - t0 > budget) break
       const job = this.mountQueue.shift()!
       const key = chunkKey(job.cx, job.cz)
       this.mountQueued.delete(key)
@@ -3292,13 +3570,17 @@ export class GameEngine {
       this.onInventoryChange?.()
     }
 
-    const duration = ACTION_DURATION[kind]
+    let duration = ACTION_DURATION[kind]
+    if (kind === 'mine') {
+      const rock = this.world.rockDrawInfo(x, y, z)
+      duration = mineDurationForSize(rock?.size ?? 1)
+    }
     this.activeAction = {
       kind,
       duration,
       elapsed: 0,
       hits: 0,
-      nextHitAt: kind === 'chop' || kind === 'mine' ? 0 : duration,
+      nextHitAt: duration,
       x,
       y,
       z,
@@ -3312,9 +3594,8 @@ export class GameEngine {
     this.targetActionLabel = actionLabel(kind)
     this.onActionUi?.()
 
-    if (kind === 'chop' || kind === 'mine') {
-      this.performHit()
-    } else {
+    // 砍/采：音效与挥砍由 tickAction 按节奏触发，最后一下对齐倒计时结束
+    if (kind !== 'chop' && kind !== 'mine') {
       this.body.playSwing('dig')
       this.audio?.play('dig')
     }
@@ -3424,22 +3705,63 @@ export class GameEngine {
     if (a.kind === 'chop') {
       this.body.playSwing('axe')
       this.body.setHoldingAxe(true)
-      this.notch.showAt(a.x, a.y, a.z, a.face, a.hits)
-      this.debris.burst(a.x + 0.5, a.y + 0.5, a.z + 0.5, 0x8b5a2b, 10, new THREE.Vector3(a.face.x, 0.2, a.face.z))
+      this.notch.showAt(a.x, a.y, a.z, a.face, a.hits, WOOD_TRUNK_R)
+      // 木屑从树干表面飞出，不要在玩家脚边
+      let nx = a.face.x
+      let nz = a.face.z
+      if (Math.abs(nx) + Math.abs(nz) < 0.01) {
+        nx = 0
+        nz = 1
+      }
+      const nlen = Math.hypot(nx, nz) || 1
+      nx /= nlen
+      nz /= nlen
+      const sx = a.x + 0.5 - nx * WOOD_TRUNK_R * 0.95
+      const sy = a.y + 0.38
+      const sz = a.z + 0.5 - nz * WOOD_TRUNK_R * 0.95
+      this.debris.burst(sx, sy, sz, 0x8b5a2b, 10, new THREE.Vector3(-nx, 0.35, -nz))
       this.audio?.play('chop')
     } else if (a.kind === 'mine') {
       this.body.playSwing('axe')
       this.body.setHoldingAxe(true)
       const info = this.world.rockDrawInfo(a.x, a.y, a.z)
-      const pivot = info
-        ? {
-            x: info.x + 0.5,
-            y: info.y + (info.size === 1 ? 0.35 : info.size === 2 ? 0.5 : 0.65),
-            z: info.z + 0.5,
-          }
-        : undefined
-      this.crack.showAt(a.x, a.y, a.z, a.face, a.hits, pivot)
-      this.debris.burst(a.x + 0.5, a.y + 0.5, a.z + 0.5, 0x8a8e94, 12, new THREE.Vector3(a.face.x, 0.2, a.face.z))
+      const size = info?.size ?? 1
+      const base = size === 1 ? 0.42 : size === 2 ? 0.72 : 1.05
+      const rockH = base * 0.62
+      const pivot = {
+        x: (info?.x ?? a.x) + 0.5,
+        y: (info?.y ?? a.y) + rockH * 0.55,
+        z: (info?.z ?? a.z) + 0.5,
+      }
+      const surfaceR = base * 0.72
+      this.crack.showAt(a.x, a.y, a.z, a.face, a.hits, pivot, surfaceR)
+
+      let nx = a.face.x
+      let ny = a.face.y
+      let nz = a.face.z
+      if (Math.abs(nx) + Math.abs(ny) + Math.abs(nz) < 0.01) {
+        nx = 0
+        ny = 0.4
+        nz = 1
+      }
+      if (Math.abs(ny) > 0.85) {
+        nx = 0
+        ny = 0.4
+        nz = 1
+      }
+      const nlen = Math.hypot(nx, ny, nz) || 1
+      nx /= nlen
+      ny /= nlen
+      nz /= nlen
+      const lift = surfaceR * 0.9
+      this.debris.burst(
+        pivot.x + nx * lift,
+        pivot.y + ny * lift,
+        pivot.z + nz * lift,
+        0x8a8e94,
+        12,
+        new THREE.Vector3(nx, Math.max(0.2, ny), nz)
+      )
       this.audio?.play('mine')
     } else {
       this.body.playSwing('dig')
@@ -3510,6 +3832,7 @@ export class GameEngine {
     a.elapsed += dt
     this.actionProgress = Math.min(1, a.elapsed / a.duration)
     this.actionRemainSec = Math.max(0, a.duration - a.elapsed)
+    this.onActionUi?.()
 
     if (a.kind === 'dig' || a.kind === 'clear' || a.kind === 'build') {
       this.actionSfxAcc += dt
@@ -3520,14 +3843,14 @@ export class GameEngine {
       }
     }
 
-    if (a.kind === 'chop') {
-      // 3 秒 3 刀：0 / 1 / 2 秒各一刀，第 3 秒完成
-      const expected = Math.min(3, Math.floor(a.elapsed) + 1)
-      while (a.hits < expected && a.hits < 3) this.performHit()
-    } else if (a.kind === 'mine') {
-      // 1.2 秒约 2 下裂纹
-      const expected = Math.min(2, Math.floor(a.elapsed / 0.6) + 1)
-      while (a.hits < expected && a.hits < 2) this.performHit()
+    if (a.kind === 'chop' || a.kind === 'mine') {
+      // 砍树 3 刀 / 采石 2 刀：均匀落在时长内，最后一刀 = 倒计时结束
+      const totalHits = a.kind === 'chop' ? 3 : 2
+      while (a.hits < totalHits) {
+        const nextAt = (a.duration * (a.hits + 1)) / totalHits
+        if (a.elapsed + 1e-4 < nextAt) break
+        this.performHit()
+      }
     }
 
     if (a.elapsed >= a.duration) {
@@ -3636,25 +3959,42 @@ export class GameEngine {
       addMaterial(this.inventory, 'wood', woodCount)
       this.onInventoryChange?.()
     }
-    this.debris.burst(burstX + 0.5, burstY + 0.6, burstZ + 0.5, 0x8b5a2b, 12)
+    this.debris.burst(burstX + 0.5, burstY + 0.45, burstZ + 0.5, 0x8b5a2b, 14)
     this.hideSelectionTint()
     this.lastActionHint = `+${woodCount} 木材`
     this.updateBlockSelection()
   }
 
-  /** 开采：石头立刻消失并入库（不留碎石摊） */
+  /** 开采：整块石堆一次清除并入库（不留碎石 / 不留幽灵格） */
   private finishMineStone(x: number, y: number, z: number) {
     if (this.world.get(x, y, z) !== 'stone') return
-    this.debris.burst(x + 0.5, y + 0.35, z + 0.5, 0x9a968c, 8)
-    this.world.set(x, y, z, 'air')
-    this.rebuildChunkAt(x, z)
-    this.emitBlocks([{ x, y, z, blockId: 'air' }])
+    const info = this.world.rockDrawInfo(x, y, z)
+    const cells = this.world.allRockCellsAt(x, y, z) || [{ x, y, z }]
+    const size = info?.size ?? Math.min(3, Math.max(1, cells.length <= 1 ? 1 : cells.length <= 4 ? 2 : 3))
+    const gain = size
+
+    const base = size === 1 ? 0.42 : size === 2 ? 0.72 : 1.05
+    const burstX = info ? info.x + 0.5 : x + 0.5
+    const burstY = info ? info.y + base * 0.35 : y + 0.35
+    const burstZ = info ? info.z + 0.5 : z + 0.5
+    this.debris.burst(burstX, burstY, burstZ, 0x9a968c, 8 + size * 2)
+
+    const rebuildBlocks: { x: number; z: number }[] = []
+    const changed: { x: number; y: number; z: number; blockId: BlockId }[] = []
+    for (const c of cells) {
+      this.world.set(c.x, c.y, c.z, 'air')
+      rebuildBlocks.push({ x: c.x, z: c.z })
+      changed.push({ x: c.x, y: c.y, z: c.z, blockId: 'air' })
+    }
+    this.rebuildChunksForBlocks(rebuildBlocks)
+    this.emitBlocks(changed)
+
     if (this.inventory) {
-      addMaterial(this.inventory, 'stone', 1)
+      addMaterial(this.inventory, 'stone', gain)
       this.onInventoryChange?.()
     }
     this.hideSelectionTint()
-    this.lastActionHint = '+1 石材'
+    this.lastActionHint = `+${gain} 石材`
     this.updateBlockSelection()
   }
 
@@ -3895,13 +4235,14 @@ export class GameEngine {
       return this.rayHitsWoodTrunk(o, d, x, z, maxDist)
     }
     if (id === 'shrub') {
+      const feat = this.world.featureBaseY(x, z)
       return this.rayHitsYCylinder(
         o,
         d,
         x + 0.5,
         z + 0.5,
-        FEATURE_Y,
-        FEATURE_Y + 1.05,
+        feat,
+        feat + 1.05,
         0.38,
         maxDist
       )
@@ -3934,13 +4275,14 @@ export class GameEngine {
     const size = info.size
     const r = this.naturalRockSelectRadius(size)
     const h = this.naturalRockSelectHeight(size)
+    const feat = this.world.featureBaseY(sx, sz)
     return this.rayHitsYCylinder(
       o,
       d,
       sx + 0.5,
       sz + 0.5,
-      FEATURE_Y,
-      FEATURE_Y + h,
+      feat,
+      feat + h,
       r,
       maxDist
     )
@@ -3955,7 +4297,8 @@ export class GameEngine {
   ) {
     let lo = Infinity
     let hi = -Infinity
-    for (let yy = FEATURE_Y; yy <= FEATURE_Y + 14; yy++) {
+    const feat = this.world.featureBaseY(x, z)
+    for (let yy = feat; yy <= feat + 14; yy++) {
       if (this.world.get(x, yy, z) !== 'wood') continue
       lo = Math.min(lo, yy)
       hi = Math.max(hi, yy + 1)
@@ -4400,10 +4743,11 @@ export class GameEngine {
       for (let dx = -2; dx <= 2; dx++) {
         const sx = ix + dx
         const sz = iz + dz
-        const size = this.world.naturalRockAnchorSize(sx, FEATURE_Y, sz)
+        const feat = this.world.featureBaseY(sx, sz)
+        const size = this.world.naturalRockAnchorSize(sx, feat, sz)
         if (size == null) continue
-        const rockBot = FEATURE_Y
-        const rockTop = FEATURE_Y + this.naturalRockHeight(size)
+        const rockBot = feat
+        const rockTop = feat + this.naturalRockHeight(size)
         // 站在石顶（含小余量）：不挡，避免贴地微陷触发碰撞抖动
         if (y0 >= rockTop - 0.12) continue
         if (y1 <= rockBot + 0.02) continue
@@ -4431,11 +4775,12 @@ export class GameEngine {
         const sz = iz + dz
         let trunkLo = Infinity
         let trunkHi = -Infinity
-        for (let y = FEATURE_Y; y <= FEATURE_Y + 12; y++) {
+        const feat = this.world.featureBaseY(sx, sz)
+        for (let y = feat; y <= feat + 12; y++) {
           if (this.world.get(sx, y, sz) !== 'wood') continue
           const stacked =
             this.world.get(sx, y + 1, sz) === 'wood' || this.world.get(sx, y - 1, sz) === 'wood'
-          if (!stacked && y > FEATURE_Y + 1) continue
+          if (!stacked && y > feat + 1) continue
           trunkLo = Math.min(trunkLo, y)
           trunkHi = Math.max(trunkHi, y + 1)
         }
@@ -4488,9 +4833,10 @@ export class GameEngine {
       for (let dx = -2; dx <= 2; dx++) {
         const sx = ix + dx
         const sz = iz + dz
-        const size = this.world.naturalRockAnchorSize(sx, FEATURE_Y, sz)
+        const feat = this.world.featureBaseY(sx, sz)
+        const size = this.world.naturalRockAnchorSize(sx, feat, sz)
         if (size == null) continue
-        const top = FEATURE_Y + this.naturalRockHeight(size)
+        const top = feat + this.naturalRockHeight(size)
         if (top > feetY + 0.25 || top < feetY - 1.6) continue
         const cx = sx + 0.5
         const cz = sz + 0.5
@@ -4507,20 +4853,23 @@ export class GameEngine {
   }
 
   getGroundY(x: number, z: number) {
-    for (let y = SURFACE_Y + 2; y >= 0; y--) {
+    const sy = this.world.surfaceHeight(x, z)
+    for (let y = sy + FEATURE_HEADROOM + 2; y >= 0; y--) {
       if (this.world.solid(x, y, z)) return y + 1
     }
     const fx = Math.floor(x)
     const fz = Math.floor(z)
-    if (this.world.get(fx, SURFACE_Y, fz) === 'water') {
-      return SURFACE_Y
+    if (this.world.get(fx, sy, fz) === 'water') {
+      return sy
     }
-    return SURFACE_Y + 1
+    return sy + 1
   }
 
-  /** 人机站立高度：只走平地，不贴石头/房顶爬升 */
-  getNpcStandY() {
-    return SURFACE_Y + 1
+  /** 人机站立高度：跟随当地地表 */
+  getNpcStandY(x?: number, z?: number) {
+    const px = x ?? this.camera.position.x
+    const pz = z ?? this.camera.position.z
+    return this.getGroundY(px, pz)
   }
 
   /**
@@ -4545,14 +4894,15 @@ export class GameEngine {
     const fx = Math.floor(x)
     const fz = Math.floor(z)
     if (this.world.isCreek(fx, fz)) return false
-    const floor = this.world.get(fx, SURFACE_Y, fz)
+    const sy = this.world.surfaceHeight(fx, fz)
+    const floor = this.world.get(fx, sy, fz)
     if (floor === 'water' || floor === 'air') return false
-    for (let y = SURFACE_Y + 1; y <= SURFACE_Y + 2; y++) {
+    for (let y = sy + 1; y <= sy + 2; y++) {
       if (this.world.solid(fx, y, fz)) return false
     }
     // 天然石 / 树干造型碰撞（与玩家一致）
-    const y0 = SURFACE_Y + 1
-    const y1 = SURFACE_Y + 1.7
+    const y0 = sy + 1
+    const y1 = sy + 1.7
     if (this.collidesNaturalRocks(x, y0, y1, z)) return false
     if (this.collidesWoodTrunks(x, y0, y1, z)) return false
     return true
@@ -4573,7 +4923,7 @@ export class GameEngine {
 
   /**
    * 水平移动（分轴）：体型碰撞防穿墙。
-   * 一格高台不能靠走跨上去，必须跳跃。
+   * 缓坡允许自动迈上一格；更高的坎仍需跳跃。
    */
   private tryMoveAxis(axis: 'x' | 'z', next: number) {
     const ox = this.camera.position.x
@@ -4585,6 +4935,16 @@ export class GameEngine {
     if (!this.bodyCollides(nx, oy, nz)) {
       if (axis === 'x') this.camera.position.x = next
       else this.camera.position.z = next
+      return
+    }
+    // 缓坡：允许自动迈上一格台阶
+    if (this.onGround) {
+      const stepped = oy + 1.05
+      if (!this.bodyCollides(nx, stepped, nz)) {
+        this.camera.position.y = stepped
+        if (axis === 'x') this.camera.position.x = next
+        else this.camera.position.z = next
+      }
     }
   }
 
@@ -4893,8 +5253,8 @@ export class GameEngine {
   }
 
   /**
-   * 进服准备舱：落点上空亮色平台 + 空气墙；倒计时内尽量铺图，到点即投下。
-   * onProgress(remainSec, timeProgress0to1) — 进度条跟倒计时走。
+   * 进服准备舱：落点上空亮色平台 + 空气墙；倒计时按墙上时钟读秒，到点即投下。
+   * onProgress(remainSec, timeProgress0to1) — 进度条跟真实倒计时走（不跟铺图卡顿）。
    */
   beginDeploy(
     dest: { x: number; y: number; z: number; yaw?: number; pitch?: number },
@@ -4929,6 +5289,8 @@ export class GameEngine {
       },
       remain: duration,
       duration,
+      endsAt: performance.now() + duration * 1000,
+      lastUiAt: 0,
       onProgress: opts?.onProgress,
       onComplete: opts?.onComplete,
     }
@@ -5024,7 +5386,7 @@ export class GameEngine {
     this.deploy = null
   }
 
-  private tickDeploy(dt: number) {
+  private tickDeploy(_dt: number) {
     const d = this.deploy
     if (!d?.active) return
 
@@ -5035,9 +5397,15 @@ export class GameEngine {
     this.camera.position.x = Math.max(d.cx - half, Math.min(d.cx + half, this.camera.position.x))
     this.camera.position.z = Math.max(d.cz - half, Math.min(d.cz + half, this.camera.position.z))
 
-    d.remain = Math.max(0, d.remain - dt)
+    // 墙上时钟读秒：铺图卡帧时也不会变慢（不再用被 clamp 的 dt 累加）
+    d.remain = Math.max(0, (d.endsAt - performance.now()) / 1000)
     const timeProgress = d.duration > 0 ? 1 - d.remain / d.duration : 1
-    d.onProgress?.(d.remain, timeProgress)
+    // UI 约 10Hz，避免每帧写 Vue reactive 加重舱内卡顿
+    const nowMs = performance.now()
+    if (nowMs - d.lastUiAt > 100 || d.remain <= 0) {
+      d.lastUiAt = nowMs
+      d.onProgress?.(d.remain, timeProgress)
+    }
 
     // 到点投下；期间能铺多少地图算多少
     if (d.remain <= 0) this.finishDeploy()
@@ -5091,12 +5459,13 @@ export class GameEngine {
   getSurfaceUnder(x: number, z: number): import('./gameAudio').SurfaceKind {
     const fx = Math.floor(x)
     const fz = Math.floor(z)
-    if (this.world.isCreek(fx, fz) || this.world.get(fx, SURFACE_Y, fz) === 'water') {
+    const sy = this.world.surfaceHeight(fx, fz)
+    if (this.world.isCreek(fx, fz) || this.world.get(fx, sy, fz) === 'water') {
       return 'water'
     }
     const feet = this.camera.position.y - this.eyeHeight
     const support = this.supportTopY(x, feet, z)
-    const y = support != null ? Math.floor(support - 0.01) : SURFACE_Y
+    const y = support != null ? Math.floor(support - 0.01) : sy
     const id = this.world.get(fx, y, fz)
     if (id === 'stone' || id === 'rubble' || id === 'alloy') return 'stone'
     if (id === 'sand') return 'sand'
@@ -5138,10 +5507,10 @@ export class GameEngine {
     const d = this.lookDir()
     if (d.lengthSq() < 1e-8) return null
 
-    const groundY = SURFACE_Y + 1
     let t: number
     if (Math.abs(d.y) > 1e-4) {
-      t = (groundY - o.y) / d.y
+      const approxY = this.getGroundY(o.x, o.z)
+      t = (approxY - o.y) / d.y
       if (t < 0.4 || t > maxDist) t = Math.min(maxDist, Math.max(8, maxDist * 0.55))
     } else {
       t = Math.min(maxDist, 32)
