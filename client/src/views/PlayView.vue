@@ -3,13 +3,44 @@
     <div ref="viewport" class="viewport" />
 
     <div class="hud">
+      <!-- 顶：金币 + 血条 -->
+      <div class="top-stats" aria-label="状态">
+        <div class="gold-chip" title="金币">
+          <span class="gold-ico">金</span>
+          <span class="gold-num">{{ formatGold(playerBag.gold) }}</span>
+        </div>
+        <div class="hp-bar-wrap" aria-label="生命值">
+          <div class="hp-bar-track">
+            <div
+              class="hp-bar-fill"
+              :class="hpBand"
+              :style="{ width: `${Math.max(0, Math.min(100, (playerHp / 10000) * 100))}%` }"
+            />
+          </div>
+          <span class="hp-bar-text">{{ Math.ceil(playerHp) }} / 10000</span>
+        </div>
+        <div
+          class="daynight-chip"
+          :class="{ night: dayNightHud.isNight, dusk: dayNightHud.phase === 'dusk' }"
+          :title="dayNightHud.text"
+        >
+          {{ dayNightHud.text }}
+        </div>
+      </div>
+
       <!-- 左上：小队条 + 其下 15 秒广播条 -->
       <div class="corner-left">
         <div v-if="squadHud.length" class="squad-strip">
-          <div v-for="m in squadHud" :key="m.userId" class="squad-row">
+          <div
+            v-for="m in squadHud"
+            :key="m.userId"
+            class="squad-row"
+            :class="{ 'is-fallen': m.fallen }"
+          >
             <i class="slot" :style="{ background: squadColor(m.slot) }">{{ m.slot }}</i>
             <span class="sname">{{ shortName(m.name) }}</span>
-            <span v-if="m.online === false" class="offline">离线</span>
+            <span v-if="m.fallen" class="fallen">已阵亡</span>
+            <span v-else-if="m.online === false" class="offline">离线</span>
           </div>
         </div>
         <div class="broadcast-feed" aria-live="polite">
@@ -75,7 +106,10 @@
       </div>
 
       <div v-if="showWare" class="warehouse">
-        <h3>仓库</h3>
+        <h3>
+          仓库
+          <button type="button" class="chip buy ware-shop-link" @click="toggleShop">商城</button>
+        </h3>
         <div class="ware-grid">
           <button
             v-for="m in materials"
@@ -89,12 +123,127 @@
             <GameIcon class="mat-icon" :name="MATERIAL_ICON[m]" :size="22" />
             <span class="mlabel">{{ MATERIAL_LABEL[m] }}</span>
             <span class="mqty">{{ inv[m] }}</span>
+            <span class="msell" @pointerdown.prevent.stop="sellItem('material', m, 1)">卖</span>
           </button>
         </div>
         <div class="ware-row">
           <span>工具</span>
           <button type="button" class="chip" :class="{ active: tool === 'hand' }" @pointerdown.prevent="setTool('hand')">手</button>
           <button type="button" class="chip" :class="{ active: tool === 'axe' }" @pointerdown.prevent="setTool('axe')">斧头</button>
+        </div>
+        <div v-if="playerBag.weapons.length" class="ware-row ware-col">
+          <span>武器</span>
+          <p class="ware-tip ware-tip-inline">
+            装备中死亡掉落 · 未装备进保险箱（最多 {{ SAFE_VAULT_MAX }} 把，超出折金）
+          </p>
+          <button
+            type="button"
+            class="chip"
+            :class="{ active: playerBag.equippedWeapon === 'fist' }"
+            @pointerdown.prevent="equipWeapon('fist')"
+          >
+            拳头
+          </button>
+          <div v-for="w in playerBag.weapons" :key="w.id" class="wpn-row">
+            <button
+              type="button"
+              class="chip"
+              :class="{ active: isEquippedInstance(w) }"
+              @pointerdown.prevent="equipWeapon(w.id)"
+            >
+              {{ weaponLabel(w.weaponId) }}
+              <i class="wpn-tag" :class="isDeathDropWeapon(w) ? 'drop' : 'safe'">
+                {{ isDeathDropWeapon(w) ? '掉落' : '保险箱' }}
+              </i>
+            </button>
+            <button
+              type="button"
+              class="chip sell"
+              :disabled="!(WEAPON_SELL[w.weaponId] > 0)"
+              @pointerdown.prevent="sellItem('weapon', w.id)"
+            >
+              卖{{ WEAPON_SELL[w.weaponId] || 0 }}
+            </button>
+          </div>
+        </div>
+        <div v-if="playerBag.chests.length" class="ware-row ware-col">
+          <span>宝箱</span>
+          <button
+            v-for="c in playerBag.chests"
+            :key="c.id"
+            type="button"
+            class="chip"
+            @pointerdown.prevent="openChest(c.id)"
+          >
+            {{ chestLabel(c.tier) }}
+          </button>
+          <button
+            v-for="c in playerBag.chests"
+            :key="`sell-c-${c.id}`"
+            type="button"
+            class="chip sell"
+            @pointerdown.prevent="sellItem('chest', c.id)"
+          >
+            卖{{ CHEST_SELL[c.tier] || 0 }}
+          </button>
+        </div>
+        <div class="ware-row">
+          <span>药物</span>
+          <button
+            type="button"
+            class="chip"
+            :disabled="playerBag.medkit_small <= 0"
+            @pointerdown.prevent="useMedkit('medkit_small')"
+          >
+            小药×{{ playerBag.medkit_small }}
+          </button>
+          <button
+            type="button"
+            class="chip sell"
+            :disabled="playerBag.medkit_small <= 0"
+            title="出售"
+            @pointerdown.prevent="sellItem('medkit', 'medkit_small')"
+          >
+            卖{{ MEDKIT_SELL.medkit_small }}
+          </button>
+          <button
+            type="button"
+            class="chip"
+            :disabled="playerBag.medkit_large <= 0"
+            @pointerdown.prevent="useMedkit('medkit_large')"
+          >
+            大药×{{ playerBag.medkit_large }}
+          </button>
+          <button
+            type="button"
+            class="chip sell"
+            :disabled="playerBag.medkit_large <= 0"
+            title="出售"
+            @pointerdown.prevent="sellItem('medkit', 'medkit_large')"
+          >
+            卖{{ MEDKIT_SELL.medkit_large }}
+          </button>
+        </div>
+        <div v-if="ownedFurniture.length" class="ware-row ware-col">
+          <span>建造物</span>
+          <div v-for="f in ownedFurniture" :key="f.id" class="furn-row">
+            <button
+              type="button"
+              class="chip"
+              :class="{ active: selectedFurniture === f.id }"
+              @pointerdown.prevent="selectFurniture(f.id)"
+            >
+              {{ f.label }}×{{ f.count }}
+            </button>
+            <button
+              type="button"
+              class="chip sell"
+              title="出售"
+              @pointerdown.prevent="sellItem('furniture', f.id)"
+            >
+              卖{{ furnitureSellPrice(f.id) }}
+            </button>
+          </div>
         </div>
         <div class="ware-row">
           <span>形状</span>
@@ -110,9 +259,31 @@
           </button>
         </div>
         <p class="ware-tip">
-          选中材料即建造 · 取消材料即挖砍采 · 「操作/放置」执行当前动作
+          选中材料即建造 · 选中建造物对准后点「放置」 · 取消即挖砍采
         </p>
         <button type="button" class="ghost-close" @click="showWare = false">关闭</button>
+      </div>
+
+      <div v-if="showShop" class="warehouse shop-panel">
+        <h3>商城 · 金币 {{ formatGold(playerBag.gold) }}</h3>
+        <p class="ware-tip">仅出售建造物与药物（武器不可购买）</p>
+        <div class="shop-list">
+          <div v-for="item in SHOP_ITEMS" :key="item.id" class="shop-row">
+            <div class="shop-meta">
+              <strong>{{ item.label }}</strong>
+              <span v-if="item.hint" class="shop-hint">{{ item.hint }}</span>
+            </div>
+            <button
+              type="button"
+              class="chip buy"
+              :disabled="playerBag.gold < item.price || isDead"
+              @pointerdown.prevent="buyShopItem(item.id)"
+            >
+              {{ item.price }} 金
+            </button>
+          </div>
+        </div>
+        <button type="button" class="ghost-close" @click="showShop = false">关闭</button>
       </div>
 
       <button
@@ -121,9 +292,39 @@
         class="desk-ware"
         title="仓库"
         aria-label="仓库"
-        @click="showWare = !showWare"
+        @click="toggleWare"
       >
         <GameIcon name="ware" :size="26" />
+      </button>
+      <button
+        v-if="!isTouch && !loading && !error"
+        type="button"
+        class="desk-shop"
+        title="商城"
+        aria-label="商城"
+        @click="toggleShop"
+      >
+        商
+      </button>
+
+      <button
+        v-if="!isTouch && !loading && !error && !isDead"
+        type="button"
+        class="desk-attack"
+        title="攻击 (F)"
+        aria-label="攻击"
+        @pointerdown.prevent="onAttack"
+      >
+        <svg viewBox="0 0 1024 1024" width="28" height="28" aria-hidden="true">
+          <path
+            d="M505.37931 745.931034l370.758621-370.75862-13.241379-57.379311-392.827586 392.827587zM439.172414 776.827586c4.413793 4.413793 13.241379 8.827586 17.655172 8.827586l-26.482758-26.482758c4.413793 4.413793 4.413793 8.827586 8.827586 17.655172z"
+            fill="currentColor"
+          />
+          <path
+            d="M434.758621 754.758621v-8.827587l-185.379311-185.37931c0 4.413793 4.413793 13.241379 8.827587 17.655173l176.551724 176.551724zM937.931034 406.068966L840.827586 22.068966c-4.413793-8.827586-8.827586-17.655172-17.655172-17.655173-8.827586-4.413793-17.655172 0-26.482759 4.413793L280.275862 520.827586l35.310345 35.310345 485.517241-481.103448 61.793104 242.75862 8.827586-8.827586c8.827586-8.827586 26.482759-8.827586 35.310345 0 8.827586 8.827586 8.827586 26.482759 0 35.310345l-30.896552 30.896552 8.827586 30.896552-366.344827 361.931034 35.310344 35.310345 375.172414-370.758621c8.827586-8.827586 13.241379-17.655172 8.827586-26.482758z"
+            fill="currentColor"
+          />
+        </svg>
       </button>
 
       <div class="bottom">
@@ -268,8 +469,9 @@
       @look="onLook"
       @jump="onJump"
       @break="onBreak"
+      @attack="onAttack"
       @crouch-toggle="onCrouchToggle"
-      @warehouse="showWare = !showWare"
+      @warehouse="toggleWare"
       @select="onControlSelect"
       @update-item="onControlDrag"
     />
@@ -347,9 +549,22 @@
     <div v-if="deploying" class="deploy-banner" aria-live="polite">
       <div class="deploy-title">准备投送</div>
       <div class="deploy-count">{{ deploySecText }}</div>
-      <div class="deploy-sub">后台铺图中 · 舱内活动，倒计时结束后回到上次位置</div>
+      <div class="deploy-sub">
+        {{ deployLoadHint }} · 组队可同舱活动 · 倒计时结束后投下
+      </div>
       <div class="deploy-bar"><i :style="{ width: `${deployTimePct}%` }" /></div>
     </div>
+
+    <div v-if="isDead" class="death-banner" aria-live="assertive">
+      <div class="deploy-title">您已死亡</div>
+      <div class="deploy-count">{{ Math.ceil(deathRemain) }}</div>
+      <div class="deploy-sub">
+        倒计时后：当前装备掉落 · 未装备武器进保险箱带回 · 其余物资留在原地并退出
+      </div>
+      <div class="deploy-bar"><i :style="{ width: `${(deathRemain / 10) * 100}%` }" /></div>
+    </div>
+
+    <div class="blood-overlay" :style="{ opacity: bloodStrength }" aria-hidden="true" />
 
     <div v-if="loading || leaving" class="overlay">
       <LoadingSpinner :text="leaving ? '正在离开…' : '进入服务器…'" />
@@ -367,17 +582,49 @@
 import { computed, inject, onBeforeUnmount, onMounted, reactive, ref, watch, type Ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { GameEngine } from '@/game/engine'
+import { DEPLOY_DURATION_SEC } from '@/game/chunkMeshApi'
 import { NpcManager } from '@/game/npcManager'
 import { PresenceClient } from '@/game/presence'
 import { RemotePlayerManager } from '@/game/remotePlayers'
 import {
   createInventory,
+  createPlayerBag,
+  normalizePlayerBag,
+  serializePlayerBag,
+  mergeMaterialsIntoBag,
+  bagMaterials,
   MATERIAL_LABEL,
   SHAPE_LABEL,
   type BuildShape,
   type MaterialId,
+  type PlayerBag,
   type ToolId,
+  type ConsumableId,
 } from '@/game/inventory'
+import {
+  WEAPON_DEFS,
+  bloodOverlayStrength,
+  canSprint,
+  injuryBand,
+  type CombatWeaponId,
+  PLAYER_MAX_HP,
+  DEATH_COUNTDOWN_SEC,
+} from '@/game/combatStats'
+import {
+  SHOP_ITEMS,
+  FURNITURE_IDS,
+  FURNITURE_LABEL,
+  MEDKIT_SELL,
+  WEAPON_SELL,
+  CHEST_SELL,
+  SAFE_VAULT_MAX,
+  furnitureSellPrice,
+  formatGold,
+  type FurnitureId,
+} from '@/game/shopCatalog'
+import { CHEST_TIER_LABEL, type ChestTier } from '@/game/treasureChest'
+import { CombatWorldView } from '@/game/combatWorldView'
+import { sampleDayNightHud, type DayNightHud } from '@/game/dayNight'
 import MobileControls from '@/components/MobileControls.vue'
 import MiniMap from '@/components/MiniMap.vue'
 import SquadChat from '@/components/SquadChat.vue'
@@ -443,17 +690,39 @@ const peerHint = ref('')
 const deploying = ref(false)
 const deployRemain = ref(0)
 const deployTimePct = ref(0)
+const deployLoadHint = ref('加载地图与作战资源…')
 const deploySecText = computed(() => Math.max(0, Math.ceil(deployRemain.value)))
 const isTouch = ref(false)
 const showWare = ref(false)
+const showShop = ref(false)
 const showSettings = ref(false)
 const playSettings = reactive<PlaySettings>(loadPlaySettings())
 const qualityOptions: QualityPreset[] = ['low', 'standard', 'high']
 const actionHint = ref('')
 const tool = ref<ToolId>('hand')
+const playerBag = reactive(createPlayerBag())
+const playerHp = ref(PLAYER_MAX_HP)
+const isDead = ref(false)
+const deathRemain = ref(0)
+const bloodStrength = computed(() => bloodOverlayStrength(playerHp.value))
+const hpBand = computed(() => injuryBand(playerHp.value))
+const dayNightHud = reactive<DayNightHud>(sampleDayNightHud())
+let dayNightTimer: number | undefined
+let combatView: CombatWorldView | null = null
+let deathCamOffset = false
+
 /** 当前选中的建造材料；有选中=建造，无选中=挖砍采 */
 const selectedMat = ref<MaterialId | null>(null)
-const buildMode = computed(() => selectedMat.value != null)
+/** 仓库选中的可放置家具 */
+const selectedFurniture = ref<FurnitureId | null>(null)
+const buildMode = computed(() => selectedMat.value != null || selectedFurniture.value != null)
+const ownedFurniture = computed(() =>
+  FURNITURE_IDS.filter((id) => (playerBag.furniture?.[id] || 0) > 0).map((id) => ({
+    id,
+    label: FURNITURE_LABEL[id],
+    count: playerBag.furniture[id] || 0,
+  }))
+)
 const buildShape = ref<BuildShape>('single')
 const inv = reactive(createInventory())
 /** 操作键图标：有材料=锤子，无材料=铲子 */
@@ -565,9 +834,10 @@ function shortChatName(userId: number, fallback?: string | null) {
 function pushBroadcast(item: SquadChatItem) {
   const isTeamChat = item.channel === 'team' && item.kind === 'chat'
   const isMark = item.kind === 'mark'
-  if (!isTeamChat && !isMark) return
+  const isDeath = item.kind === 'death'
+  if (!isTeamChat && !isMark && !isDeath) return
   const selfId = auth.user?.id || 0
-  const who = item.userId === selfId ? '我' : item.name || '队友'
+  const who = item.userId === selfId ? '我' : item.name || (isDeath ? '玩家' : '队友')
   const text =
     isMark
       ? item.text || `标记了${item.mark?.label || '地点'}`
@@ -593,6 +863,52 @@ function pushBroadcast(item: SquadChatItem) {
     broadcastLive.value = broadcastLive.value.filter((b) => b.id !== id)
   }, BROADCAST_TTL_MS)
   broadcastTimers.set(id, tid)
+}
+
+/** 已阵亡队友（死亡倒计时至踢服前） */
+const fallenSquadIds = ref(new Set<number>())
+
+function markSquadFallen(userId: number) {
+  const uid = Number(userId)
+  if (!uid) return
+  const next = new Set(fallenSquadIds.value)
+  next.add(uid)
+  fallenSquadIds.value = next
+}
+
+function clearSquadFallen(userId: number) {
+  const uid = Number(userId)
+  if (!uid || !fallenSquadIds.value.has(uid)) return
+  const next = new Set(fallenSquadIds.value)
+  next.delete(uid)
+  fallenSquadIds.value = next
+}
+
+function announcePlayerDeath(msg: Record<string, unknown>) {
+  const uid = Number(msg.userId)
+  if (!uid) return
+  const selfId = auth.user?.id || 0
+  const name =
+    uid === selfId
+      ? '我'
+      : shortChatName(
+          uid,
+          String(msg.displayName || msg.username || '') || null
+        )
+  const isMate =
+    uid === selfId || squadMembers.value.some((m) => m.userId === uid)
+  if (isMate) markSquadFallen(uid)
+
+  const item: SquadChatItem = {
+    id: nextChatId(),
+    channel: 'system',
+    kind: 'death',
+    userId: uid,
+    name: uid === selfId ? '我' : name,
+    text: '已阵亡',
+    ts: Number(msg.ts) || Date.now(),
+  }
+  appendChat(item)
 }
 
 function appendChat(item: SquadChatItem) {
@@ -761,20 +1077,22 @@ function ingestRemoteChat(msg: {
   })
 }
 
-/** 左上小队：无组队也至少显示自己为 1 号；离线队友标 offline */
+/** 左上小队：无组队也至少显示自己为 1 号；离线队友标 offline；阵亡标已阵亡 */
 const squadHud = computed(() => {
   const selfId = auth.user?.id || 0
   const onlineIds = new Set(mapPeers.value.map((p) => p.userId))
-  const withOnline = (list: SquadMember[]) =>
+  const fallen = fallenSquadIds.value
+  const withFlags = (list: SquadMember[]) =>
     list.map((m) => ({
       ...m,
       online: m.userId === selfId || onlineIds.has(m.userId),
+      fallen: fallen.has(m.userId),
     }))
 
-  if (squadMembers.value.length) return withOnline(squadMembers.value)
+  if (squadMembers.value.length) return withFlags(squadMembers.value)
   const u = auth.user
   if (!u) return []
-  return withOnline([
+  return withFlags([
     {
       userId: u.id,
       name: u.displayName || u.username || '我',
@@ -893,21 +1211,6 @@ function scheduleBlockFlush() {
   }, 400)
 }
 
-async function flushInventory() {
-  if (!serverId || !invDirty) return
-  invDirty = false
-  if (invFlushTimer) {
-    window.clearTimeout(invFlushTimer)
-    invFlushTimer = undefined
-  }
-  try {
-    await saveServerInventory(serverId, { ...inv })
-  } catch (e) {
-    invDirty = true
-    console.warn('[inventory] save failed', e)
-  }
-}
-
 function scheduleInventoryFlush() {
   invDirty = true
   if (invFlushTimer) return
@@ -917,16 +1220,26 @@ function scheduleInventoryFlush() {
   }, 800)
 }
 
-function applyInventoryFromServer(raw?: Record<string, number> | null) {
-  const base = createInventory()
-  if (raw && typeof raw === 'object') {
-    for (const k of Object.keys(base) as MaterialId[]) {
-      const n = Number(raw[k])
-      base[k] = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
-    }
+function applyInventoryFromServer(raw?: Record<string, unknown> | null) {
+  applyBag(raw || {})
+}
+
+async function flushInventory() {
+  if (!serverId || !invDirty) return
+  invDirty = false
+  if (invFlushTimer) {
+    window.clearTimeout(invFlushTimer)
+    invFlushTimer = undefined
   }
-  for (const k of Object.keys(base) as MaterialId[]) {
-    inv[k] = base[k]
+  try {
+    mergeMaterialsIntoBag(playerBag, { ...inv } as never)
+    playerBag.hp = playerHp.value
+    const saved = await saveServerInventory(serverId, serializePlayerBag(playerBag) as never)
+    applyBag(saved)
+    syncBagToPresence()
+  } catch (e) {
+    invDirty = true
+    console.warn('[inventory] save failed', e)
   }
 }
 
@@ -1056,10 +1369,11 @@ function syncEngineLoadout() {
   if (selectedMat.value) engine.buildMaterial = selectedMat.value
   engine.buildShape = buildShape.value
   engine.inventory = inv
-  engine.setBuildMode(selectedMat.value != null)
+  engine.setBuildMode(selectedMat.value != null || selectedFurniture.value != null)
 }
 
 function selectMat(m: MaterialId) {
+  selectedFurniture.value = null
   selectedMat.value = selectedMat.value === m ? null : m
   syncEngineLoadout()
   if (engine) {
@@ -1069,6 +1383,57 @@ function selectMat(m: MaterialId) {
     flashHint()
   }
 }
+
+function selectFurniture(id: FurnitureId) {
+  selectedMat.value = null
+  selectedFurniture.value = selectedFurniture.value === id ? null : id
+  syncEngineLoadout()
+  if (engine) {
+    engine.lastActionHint = selectedFurniture.value
+      ? `放置 · ${FURNITURE_LABEL[selectedFurniture.value]} · 对准后点「放置」`
+      : '操作模式 · 点「操作」挖砍采'
+    flashHint()
+  }
+}
+
+function toggleWare() {
+  showShop.value = false
+  showWare.value = !showWare.value
+}
+
+function toggleShop() {
+  showWare.value = false
+  showShop.value = !showShop.value
+}
+
+function buyShopItem(shopItemId: string) {
+  if (isDead.value) return
+  presence?.sendShopBuy(shopItemId)
+}
+
+function sellItem(kind: string, id: string, count = 1) {
+  if (isDead.value) return
+  presence?.sendShopSell({ kind, id, count })
+}
+
+function placeSelectedFurniture() {
+  if (!engine || !presence || !selectedFurniture.value || isDead.value) return
+  const aim = engine.raycastMarkAim(8)
+  const pose = engine.getPose()
+  const x = aim?.x ?? pose.x - Math.sin(pose.yaw) * 2.2
+  const z = aim?.z ?? pose.z - Math.cos(pose.yaw) * 2.2
+  const y = aim ? Math.max(0, aim.y - 1.15) : engine.getGroundY(x, z)
+  presence.sendFurniturePlace({
+    propId: selectedFurniture.value,
+    x,
+    y,
+    z,
+    yaw: pose.yaw,
+  })
+  engine.lastActionHint = `已请求放置 ${FURNITURE_LABEL[selectedFurniture.value]}`
+  flashHint()
+}
+
 function setTool(t: ToolId) {
   tool.value = t
   syncEngineLoadout()
@@ -1078,7 +1443,15 @@ function setShape(s: BuildShape) {
   syncEngineLoadout()
 }
 
-function flashHint() {
+function flashHint(text?: string) {
+  if (text) {
+    actionHint.value = text
+    if (hintTimer) window.clearTimeout(hintTimer)
+    hintTimer = window.setTimeout(() => {
+      actionHint.value = ''
+    }, 2200)
+    return
+  }
   if (!engine?.lastActionHint) return
   actionHint.value = engine.lastActionHint
   engine.lastActionHint = ''
@@ -1101,9 +1474,12 @@ function onCrouchToggle() {
   engine?.queueCrouch()
   crouched.value = Boolean(engine?.crouching)
 }
-/** 操作键：有材料则建造，否则挖砍采 */
 function onBreak() {
-  if (!engine) return
+  if (!engine || isDead.value) return
+  if (selectedFurniture.value) {
+    placeSelectedFurniture()
+    return
+  }
   if (selectedMat.value) {
     engine.beginBuild()
   } else {
@@ -1112,6 +1488,259 @@ function onBreak() {
     syncEngineLoadout()
   }
   flashHint()
+}
+
+function onAttack() {
+  if (!engine || isDead.value || !presence) return
+  const pose = engine.getPose()
+  const yaw = pose.yaw
+  let dirX = -Math.sin(yaw)
+  let dirZ = -Math.cos(yaw)
+  const weaponId =
+    tool.value === 'axe' && playerBag.equippedWeapon === 'fist'
+      ? 'axe'
+      : playerBag.equippedWeapon
+  const jitter = engine.combatAimJitter(weaponId)
+  dirX += jitter.jx
+  dirZ += jitter.jz
+  const len = Math.hypot(dirX, dirZ) || 1
+  dirX /= len
+  dirZ /= len
+  presence.sendCombatAttack({
+    x: pose.x,
+    y: pose.y,
+    z: pose.z,
+    dirX,
+    dirZ,
+    weaponId,
+    useAxe: tool.value === 'axe' && playerBag.equippedWeapon === 'fist',
+  })
+  engine.playCombatSwing(weaponId)
+  const crateId = combatView?.nearestCrate(pose.x, pose.z)
+  if (crateId) presence.sendClaimCrate(crateId)
+}
+
+function weaponLabel(id: CombatWeaponId) {
+  return WEAPON_DEFS[id]?.label || id
+}
+
+/** 当前装备的那一把实例（同名多把时仅第一把视为装备掉落） */
+function isEquippedInstance(w: PlayerBag['weapons'][number]) {
+  if (playerBag.equippedWeapon === 'fist' || playerBag.equippedWeapon === 'axe') return false
+  if (w.weaponId !== playerBag.equippedWeapon) return false
+  const first = playerBag.weapons.find((x) => x.weaponId === playerBag.equippedWeapon)
+  return first?.id === w.id
+}
+
+function isDeathDropWeapon(w: PlayerBag['weapons'][number]) {
+  return isEquippedInstance(w)
+}
+
+function chestLabel(tier: ChestTier) {
+  return CHEST_TIER_LABEL[tier] || tier
+}
+
+function applyBag(raw: unknown) {
+  const next = normalizePlayerBag(raw)
+  const furn = playerBag.furniture
+  Object.assign(playerBag, { ...next, furniture: furn })
+  Object.assign(furn, next.furniture)
+  mergeMaterialsIntoBag(playerBag, next.materials)
+  for (const k of Object.keys(inv) as MaterialId[]) {
+    inv[k] = next.materials[k] || 0
+  }
+  playerHp.value = next.hp
+  if (selectedFurniture.value && (furn[selectedFurniture.value] || 0) <= 0) {
+    selectedFurniture.value = null
+    syncEngineLoadout()
+  }
+  if (engine) {
+    engine.combatSlow = !canSprint(next.hp)
+    engine.inventory = bagMaterials(playerBag)
+  }
+}
+
+function equipWeapon(weaponInstanceId: string) {
+  if (isDead.value) return
+  if (weaponInstanceId === 'fist') {
+    playerBag.equippedWeapon = 'fist'
+    presence?.sendEquipWeapon('fist')
+    return
+  }
+  presence?.sendEquipWeapon(weaponInstanceId)
+}
+
+function openChest(chestId: string) {
+  if (isDead.value) return
+  presence?.sendClaimChest(chestId)
+}
+
+function useMedkit(kind: ConsumableId) {
+  if (isDead.value) return
+  presence?.sendUseMedkit(kind)
+  gameAudio?.play(kind === 'medkit_large' ? 'medkit_large' : 'medkit_small', { volume: 1 })
+}
+
+function beginDeathSequence(countdown = DEATH_COUNTDOWN_SEC) {
+  isDead.value = true
+  deathRemain.value = countdown
+  if (engine) {
+    engine.combatLocked = true
+    engine.combatSlow = true
+    // 第三人称：镜头抬高后移
+    if (!deathCamOffset) {
+      deathCamOffset = true
+      engine.camera.position.y += 1.2
+      engine.camera.position.x += Math.sin(engine.getPose().yaw) * 2.2
+      engine.camera.position.z += Math.cos(engine.getPose().yaw) * 2.2
+      engine.camera.lookAt(
+        engine.getPose().x,
+        engine.getPose().y - 0.6,
+        engine.getPose().z
+      )
+    }
+  }
+}
+
+function handleCombatMsg(msg: Record<string, unknown>) {
+  const t = String(msg.type || '')
+  if (t === 'combat_auth' || t === 'combat_bag') {
+    if (msg.bag) applyBag(msg.bag)
+    else if (msg.hp != null) {
+      playerHp.value = Number(msg.hp)
+      playerBag.hp = playerHp.value
+      if (engine) engine.combatSlow = !canSprint(playerHp.value)
+    }
+    if (msg.ok === false && msg.reason === 'gold') flashHint('金币不足')
+    return
+  }
+  if (t === 'combat_gold') {
+    const gold = Number(msg.gold)
+    if (Number.isFinite(gold)) playerBag.gold = gold
+    const gain = Number(msg.gain)
+    if (gain > 0) flashHint(`+${Math.floor(gain)} 金币`)
+    return
+  }
+  if (t === 'combat_hp') {
+    const prev = playerHp.value
+    playerHp.value = Number(msg.hp)
+    playerBag.hp = playerHp.value
+    playerBag.lastDamageAt = Number(msg.lastDamageAt) || Date.now()
+    if (engine) engine.combatSlow = !canSprint(playerHp.value)
+    if (playerHp.value < prev - 1) {
+      gameAudio?.play('player_hurt', { volume: 0.9 })
+      // 若带怪物种类信息则播对应攻击音
+      const monKind = String(msg.fromKind || '')
+      if (monKind) {
+        gameAudio?.playMonsterAttack(monKind, { volume: 0.7 })
+      }
+    }
+    if (msg.dead) beginDeathSequence(Number(msg.deathRemain) || DEATH_COUNTDOWN_SEC)
+    return
+  }
+  if (t === 'combat_death') {
+    announcePlayerDeath(msg)
+    if (Number(msg.userId) === Number(auth.user?.id)) {
+      beginDeathSequence(Number(msg.countdown) || DEATH_COUNTDOWN_SEC)
+    }
+    return
+  }
+  if (t === 'combat_state') {
+    if (Array.isArray(msg.monsters)) {
+      // 准备舱内不显示野怪（未投下前不应进舱）
+      if (engine?.deploying) combatView?.syncMonsters([])
+      else combatView?.syncMonsters(msg.monsters as never[])
+    }
+    if (Array.isArray(msg.crates)) {
+      combatView?.syncCrates(msg.crates as never[])
+    }
+    if (Array.isArray(msg.furniture)) {
+      combatView?.syncFurniture(msg.furniture as never[])
+    }
+    if (Array.isArray(msg.events)) {
+      const pose = engine?.getPose()
+      for (const ev of msg.events as Record<string, unknown>[]) {
+        const et = String(ev.type || '')
+        if (et === 'monster_dead' && ev.kind) {
+          gameAudio?.playMonsterDeath(String(ev.kind), {
+            volume: 1,
+            at: { x: Number(ev.x) || 0, z: Number(ev.z) || 0 },
+            listener: pose ? { x: pose.x, z: pose.z } : undefined,
+          })
+        }
+      }
+    }
+    return
+  }
+  if (t === 'furniture_placed' && msg.placed) {
+    combatView?.addFurniture(msg.placed as never)
+    const placed = msg.placed as { propId?: string; x?: number; z?: number }
+    const pose = engine?.getPose()
+    if (placed.propId) {
+      gameAudio?.playFurniturePlace(placed.propId, {
+        volume: 0.95,
+        at: { x: Number(placed.x) || 0, z: Number(placed.z) || 0 },
+        listener: pose ? { x: pose.x, z: pose.z } : undefined,
+      })
+    }
+    return
+  }
+  if (t === 'furniture_cleared') {
+    if (Array.isArray(msg.ids)) {
+      combatView?.removeFurnitureIds(msg.ids as string[])
+    }
+    if (Array.isArray(msg.furniture)) {
+      combatView?.syncFurniture(msg.furniture as never[])
+    }
+    return
+  }
+  if (t === 'combat_loot_chest' && msg.chest) {
+    const chest = msg.chest as PlayerBag['chests'][number]
+    playerBag.chests.push(chest)
+    flashHint(`获得${chestLabel(chest.tier)}`)
+    return
+  }
+  if (t === 'combat_crate_gone' && msg.crateId) {
+    combatView?.removeCrate(String(msg.crateId))
+    return
+  }
+  if (t === 'combat_kick') {
+    clearSquadFallen(Number(auth.user?.id) || 0)
+    const comp = Number(msg.compensation) || 0
+    flashHint(
+      String(
+        msg.message ||
+          (comp > 0
+            ? `死亡清场补偿 ${comp} 金币`
+            : '您已死亡')
+      )
+    )
+    router.replace({ name: 'home' }).catch(() => undefined)
+    return
+  }
+  if (t === 'combat_attack_result' && msg.ok) {
+    const weaponId = String(msg.weaponId || playerBag.equippedWeapon || 'fist')
+    const events = Array.isArray(msg.events) ? (msg.events as Record<string, unknown>[]) : []
+    const pose = engine?.getPose()
+    const listener = pose ? { x: pose.x, z: pose.z } : undefined
+    for (const ev of events) {
+      if (String(ev.type) !== 'hit') continue
+      const at = {
+        x: Number(ev.x) || pose?.x || 0,
+        z: Number(ev.z) || pose?.z || 0,
+      }
+      gameAudio?.playWeaponHit(weaponId, { volume: 1, at, listener })
+      const kind = String(ev.kind || msg.hitKind || '')
+      if (kind) gameAudio?.playMonsterHurt(kind, { volume: 0.9, at, listener })
+    }
+    return
+  }
+}
+
+function syncBagToPresence() {
+  mergeMaterialsIntoBag(playerBag, { ...inv } as never)
+  playerBag.hp = playerHp.value
+  presence?.sendSyncBag(serializePlayerBag(playerBag))
 }
 
 function layoutUserId() {
@@ -1412,6 +2041,10 @@ function onPlayKeyDown(e: KeyboardEvent) {
       }
     }
   }
+  if (e.code === 'KeyF') {
+    e.preventDefault()
+    onAttack()
+  }
 }
 
 async function refreshNearby() {
@@ -1497,41 +2130,75 @@ onMounted(async () => {
     engine.onInventoryChange = () => {
       scheduleInventoryFlush()
     }
+    engine.onHarvestLoot = (source) => {
+      presence?.sendHarvestLoot(source)
+    }
     engine.onBlocksChange = (blocks) => {
       publishLocalBlocks(blocks)
       mapTerrainRev.value += 1
     }
+    combatView = new CombatWorldView(engine.scene)
     syncEngineLoadout()
 
     const sp = data.player
     const dropX = sp.x
     const dropZ = sp.z
     const dropY = sp.y || engine.getGroundY(dropX, dropZ) + 0.02 + 1.62
-    mapMe.x = dropX
-    mapMe.z = dropZ
+    const cabinX = Number.isFinite(sp.cabinX) ? Number(sp.cabinX) : dropX
+    const cabinZ = Number.isFinite(sp.cabinZ) ? Number(sp.cabinZ) : dropZ
+    const partySlot = Math.max(0, Math.floor(Number(sp.partySlot) || 0))
+    mapMe.x = cabinX
+    mapMe.z = cabinZ
     mapMe.yaw = sp.yaw || 0
 
     deploying.value = true
-    deployRemain.value = 10
+    deployRemain.value = DEPLOY_DURATION_SEC
     deployTimePct.value = 0
+    deployLoadHint.value = '加载地图与作战资源…'
+    combatView?.syncMonsters([])
     engine.beginDeploy(
       { x: dropX, y: dropY, z: dropZ, yaw: sp.yaw, pitch: sp.pitch },
       {
-        durationSec: 10,
+        durationSec: DEPLOY_DURATION_SEC,
+        cabinX,
+        cabinZ,
+        partySlot,
         onProgress: (remain, timeProgress) => {
           deployRemain.value = remain
           deployTimePct.value = Math.round(Math.min(1, Math.max(0, timeProgress)) * 100)
+          if (engine) {
+            const warm = Math.round(engine.getDeployWarmProgress() * 100)
+            const label = engine.getDeployWarmLabel()
+            deployLoadHint.value =
+              warm >= 100
+                ? '地图铺设中 · 作战资源就绪'
+                : `预热 ${label}（${warm}%）· 铺设落点地图`
+          }
         },
         onComplete: () => {
           deploying.value = false
           deployRemain.value = 0
           deployTimePct.value = 100
+          deployLoadHint.value = '已抵达'
           if (engine) {
             mapMe.x = engine.camera.position.x
             mapMe.z = engine.camera.position.z
             fetchBlocksAround(engine.camera.position.x, engine.camera.position.z, true).catch(
               () => undefined
             )
+            if (presence) {
+              const pose = engine.getPose()
+              presence.sendPresence({
+                x: engine.camera.position.x,
+                y: engine.camera.position.y,
+                z: engine.camera.position.z,
+                yaw: pose.yaw,
+                pitch: pose.pitch,
+                action: pose.action,
+                crouching: pose.crouching,
+                deploying: false,
+              })
+            }
           }
           hint.value = '已抵达'
           window.setTimeout(() => {
@@ -1540,12 +2207,28 @@ onMounted(async () => {
         },
       }
     )
-    // 后台拉落点方块覆盖（与网格预载并行）
-    fetchBlocksAround(dropX, dropZ, true).catch(() => undefined)
+    // 立刻上报舱内状态，避免服务器按舱高刷怪
+    if (presence) {
+      const pose = engine.getPose()
+      presence.sendPresence({
+        x: engine.camera.position.x,
+        y: engine.camera.position.y,
+        z: engine.camera.position.z,
+        yaw: pose.yaw,
+        pitch: pose.pitch,
+        action: pose.action,
+        crouching: pose.crouching,
+        deploying: true,
+      })
+    }
+    // 后台拉舱心 + 落点方块覆盖（与网格/预热并行）
+    fetchBlocksAround(cabinX, cabinZ, true).catch(() => undefined)
+    if (Math.hypot(dropX - cabinX, dropZ - cabinZ) > 8) {
+      fetchBlocksAround(dropX, dropZ, true).catch(() => undefined)
+    }
 
     engine.onPosition = (pos) => {
-      if (engine?.deploying) return
-      hint.value = `${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}`
+      // 准备舱也心跳：后进队友才能对准同一舱心
       serverHeartbeat({
         serverId,
         x: pos.x,
@@ -1554,6 +2237,8 @@ onMounted(async () => {
         yaw: pos.yaw,
         pitch: pos.pitch,
       }).catch(() => undefined)
+      if (engine?.deploying) return
+      hint.value = `${Math.floor(pos.x)},${Math.floor(pos.y)},${Math.floor(pos.z)}`
       fetchBlocksAround(pos.x, pos.z).catch(() => undefined)
     }
     engine.onFrame = (dt) => {
@@ -1561,7 +2246,11 @@ onMounted(async () => {
       if (!eng) return
       if (!eng.deploying) {
         npc?.update(dt)
-        remotes?.update(dt)
+      }
+      remotes?.update(dt)
+      combatView?.tick(dt)
+      if (isDead.value) {
+        deathRemain.value = Math.max(0, deathRemain.value - dt)
       }
       if (eng.tool !== tool.value) tool.value = eng.tool
       if (crouched.value !== eng.crouching) crouched.value = eng.crouching
@@ -1571,9 +2260,8 @@ onMounted(async () => {
       if (mapMeAcc > 0.1) {
         mapMeAcc = 0
         if (eng.deploying) {
-          // 准备舱：小地图盯着落点，不跟天上舱晃
-          mapMe.x = dropX
-          mapMe.z = dropZ
+          mapMe.x = cabinX
+          mapMe.z = cabinZ
           mapMe.yaw = eng.getPose().yaw
         } else {
           mapMe.x = eng.camera.position.x
@@ -1593,7 +2281,7 @@ onMounted(async () => {
       }
 
       presenceAcc += dt
-      if (presenceAcc > 0.12 && presence && !eng.deploying) {
+      if (presenceAcc > 0.12 && presence) {
         presenceAcc = 0
         const pose = eng.getPose()
         presence.sendPresence({
@@ -1604,6 +2292,7 @@ onMounted(async () => {
           pitch: pose.pitch,
           action: pose.action,
           crouching: pose.crouching,
+          deploying: eng.deploying,
         })
       }
     }
@@ -1636,6 +2325,7 @@ onMounted(async () => {
         onLeft: (uid) => {
           remotes?.remove(uid)
           removeSquadMark(uid)
+          clearSquadFallen(uid)
         },
         onBlocks: (blocks) => {
           engine?.applyRemoteBlocks(blocks)
@@ -1663,6 +2353,7 @@ onMounted(async () => {
           })
         },
         onSquadChat: (msg) => ingestRemoteChat(msg),
+        onCombat: (msg) => handleCombatMsg(msg),
       })
     }
 
@@ -1681,6 +2372,11 @@ onMounted(async () => {
       refreshNearby()
     }, 5000)
     refreshNearby()
+    const tickDayNight = () => {
+      Object.assign(dayNightHud, sampleDayNightHud())
+    }
+    tickDayNight()
+    dayNightTimer = window.setInterval(tickDayNight, 1000)
     refreshPartyHud()
     partyTimer = window.setInterval(() => {
       if (document.hidden) return
@@ -1703,6 +2399,7 @@ onBeforeUnmount(() => {
   offLayout?.()
   window.removeEventListener('keydown', onPlayKeyDown)
   if (nearbyTimer) window.clearInterval(nearbyTimer)
+  if (dayNightTimer) window.clearInterval(dayNightTimer)
   if (blockSyncTimer) window.clearInterval(blockSyncTimer)
   if (partyTimer) window.clearInterval(partyTimer)
   if (hintTimer) window.clearTimeout(hintTimer)
@@ -1718,6 +2415,8 @@ onBeforeUnmount(() => {
   gameAudio = null
   presence?.disconnect()
   presence = null
+  combatView?.dispose()
+  combatView = null
   // 同步冲刷（不 await unmount，但尽量 fire-and-await via void）
   void flushWorldStateBeforeLeave()
   sessionStorage.removeItem('sv_join')
@@ -1755,7 +2454,8 @@ onBeforeUnmount(() => {
 .play.editing-controls .hotbar,
 .play.editing-controls .corner-right,
 .play.editing-controls .warehouse,
-.play.editing-controls .desk-ware {
+.play.editing-controls .desk-ware,
+.play.editing-controls .desk-shop {
   pointer-events: none !important;
 }
 
@@ -1901,6 +2601,18 @@ onBeforeUnmount(() => {
   font-weight: 600;
   color: rgba(160, 168, 172, 0.85);
   letter-spacing: 0.02em;
+}
+
+.squad-row .fallen {
+  flex-shrink: 0;
+  font-size: 0.56rem;
+  font-weight: 700;
+  color: rgba(255, 120, 120, 0.95);
+  letter-spacing: 0.02em;
+}
+
+.squad-row.is-fallen .sname {
+  color: rgba(200, 180, 180, 0.7);
 }
 
 /* 右上：地图在上，设置在下 */
@@ -2309,6 +3021,44 @@ onBeforeUnmount(() => {
   padding: 0;
 }
 
+.desk-shop {
+  pointer-events: auto;
+  position: absolute;
+  right: max(0.75rem, env(safe-area-inset-right));
+  bottom: max(14.5rem, calc(env(safe-area-inset-bottom) + 13.5rem));
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+  border: 2px solid rgba(220, 180, 80, 0.95);
+  background: rgba(70, 55, 20, 0.78);
+  color: #ffe9a8;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  z-index: 5;
+  padding: 0;
+  font-weight: 800;
+  font-size: 1.05rem;
+}
+
+.desk-attack {
+  pointer-events: auto;
+  position: absolute;
+  right: max(0.75rem, env(safe-area-inset-right));
+  bottom: max(10.5rem, calc(env(safe-area-inset-bottom) + 9.5rem));
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+  border: 2px solid rgba(255, 140, 100, 0.9);
+  background: rgba(90, 35, 30, 0.78);
+  color: #ffe8e0;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  z-index: 5;
+  padding: 0;
+}
+
 .warehouse {
   pointer-events: auto;
   position: absolute;
@@ -2330,6 +3080,15 @@ onBeforeUnmount(() => {
   margin: 0 0 0.45rem;
   font-size: 0.85rem;
   color: rgba(245, 248, 247, 0.92);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.ware-shop-link {
+  font-size: 0.68rem;
+  padding: 0.15rem 0.45rem;
 }
 
 .ware-grid {
@@ -2340,9 +3099,9 @@ onBeforeUnmount(() => {
 
 .ware-item {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto 1fr auto auto;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.28rem;
   padding: 0.4rem 0.45rem;
   border-radius: 4px;
   border: 1px solid rgba(255, 255, 255, 0.14);
@@ -2351,6 +3110,14 @@ onBeforeUnmount(() => {
   cursor: pointer;
   font-size: 0.75rem;
   -webkit-tap-highlight-color: transparent;
+}
+
+.ware-item .msell {
+  font-size: 0.62rem;
+  color: rgba(255, 220, 140, 0.85);
+  padding: 0.1rem 0.25rem;
+  border-radius: 3px;
+  border: 1px solid rgba(230, 190, 80, 0.35);
 }
 
 .ware-item .mlabel {
@@ -2662,6 +3429,242 @@ onBeforeUnmount(() => {
   background: linear-gradient(180deg, rgba(8, 22, 34, 0.82), rgba(8, 22, 34, 0.55));
   border: 1px solid rgba(140, 210, 255, 0.35);
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+}
+
+.death-banner {
+  position: absolute;
+  left: 50%;
+  top: 18%;
+  transform: translateX(-50%);
+  z-index: 19;
+  min-width: min(78vw, 340px);
+  padding: 0.85rem 1.15rem 1rem;
+  text-align: center;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(40, 8, 12, 0.9), rgba(24, 6, 10, 0.7));
+  border: 1px solid rgba(255, 100, 100, 0.45);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.blood-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse at center, transparent 35%, rgba(120, 0, 0, 0.55) 100%),
+    repeating-linear-gradient(
+      -18deg,
+      transparent 0 18px,
+      rgba(90, 0, 0, 0.08) 18px 20px
+    );
+  mix-blend-mode: multiply;
+  transition: opacity 0.35s ease;
+}
+
+.hp-bar-wrap {
+  position: relative;
+  left: auto;
+  top: auto;
+  transform: none;
+  z-index: 16;
+  width: min(52vw, 280px);
+  pointer-events: none;
+}
+
+.top-stats {
+  position: absolute;
+  left: 50%;
+  top: max(0.45rem, env(safe-area-inset-top));
+  transform: translateX(-50%);
+  z-index: 16;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.28rem;
+  pointer-events: none;
+}
+
+.gold-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(30, 24, 8, 0.72);
+  border: 1px solid rgba(230, 190, 80, 0.55);
+  color: #ffe7a0;
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+}
+
+.daynight-chip {
+  margin-top: 0.05rem;
+  padding: 0.16rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(18, 28, 40, 0.72);
+  border: 1px solid rgba(160, 190, 220, 0.4);
+  color: rgba(220, 235, 250, 0.92);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+  white-space: nowrap;
+}
+
+.daynight-chip.dusk {
+  border-color: rgba(255, 170, 90, 0.55);
+  color: #ffe0b8;
+  background: rgba(50, 28, 12, 0.75);
+}
+
+.daynight-chip.night {
+  border-color: rgba(120, 150, 220, 0.55);
+  color: #c8d8ff;
+  background: rgba(12, 18, 40, 0.78);
+}
+
+.gold-ico {
+  width: 1.05rem;
+  height: 1.05rem;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 0.58rem;
+  background: linear-gradient(145deg, #f0d060, #c89020);
+  color: #3a2808;
+}
+
+.hp-bar-track {
+  height: 0.55rem;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  overflow: hidden;
+}
+
+.hp-bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  transition: width 0.2s ease, background 0.3s ease;
+}
+
+.hp-bar-fill.healthy {
+  background: linear-gradient(90deg, #3ecf6a, #7dff9a);
+}
+.hp-bar-fill.light {
+  background: linear-gradient(90deg, #e0b020, #ffe066);
+}
+.hp-bar-fill.critical,
+.hp-bar-fill.dead {
+  background: linear-gradient(90deg, #c02020, #ff6060);
+}
+
+.hp-bar-text {
+  display: block;
+  margin-top: 0.2rem;
+  text-align: center;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.85);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+}
+
+.ware-col {
+  flex-wrap: wrap;
+}
+
+.chip.sell {
+  border-color: rgba(230, 190, 80, 0.45);
+  color: #ffe7a0;
+  background: rgba(70, 55, 18, 0.55);
+}
+
+.chip.buy {
+  border-color: rgba(120, 210, 160, 0.5);
+  color: #c8ffe0;
+  background: rgba(20, 60, 40, 0.55);
+}
+
+.furn-row {
+  display: inline-flex;
+  gap: 0.25rem;
+  align-items: center;
+}
+
+.wpn-row {
+  display: inline-flex;
+  gap: 0.25rem;
+  align-items: center;
+}
+
+.wpn-tag {
+  display: inline-block;
+  margin-left: 0.28rem;
+  font-size: 0.58rem;
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 0.05rem 0.22rem;
+  border-radius: 3px;
+}
+
+.wpn-tag.drop {
+  color: #ffd0c8;
+  background: rgba(140, 40, 30, 0.65);
+  border: 1px solid rgba(255, 140, 120, 0.45);
+}
+
+.wpn-tag.safe {
+  color: #d4f0ff;
+  background: rgba(30, 70, 100, 0.6);
+  border: 1px solid rgba(120, 180, 220, 0.4);
+}
+
+.ware-tip-inline {
+  flex-basis: 100%;
+  margin: 0.1rem 0 0.15rem;
+}
+
+.shop-panel {
+  max-height: min(70vh, 520px);
+  overflow: auto;
+}
+
+.shop-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0.35rem 0 0.5rem;
+}
+
+.shop-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.35rem 0.4rem;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.shop-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.shop-meta strong {
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.shop-hint {
+  font-size: 0.65rem;
+  color: rgba(220, 230, 228, 0.55);
 }
 
 .deploy-title {

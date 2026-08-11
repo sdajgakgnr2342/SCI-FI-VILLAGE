@@ -53,7 +53,7 @@
             ×
           </button>
         </div>
-        <p class="party-desc">邀请好友进同一服务器，出生在彼此旁边。</p>
+        <p class="party-desc">邀请好友进同一服务器；准备舱内可同舱活动，落地后出生在彼此旁边。</p>
 
         <div class="invite-row">
           <input

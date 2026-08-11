@@ -14,8 +14,8 @@ export interface ChatMarkPayload {
 export interface SquadChatItem {
   id: string
   channel: ChatChannel
-  /** chat | mark | wait */
-  kind: 'chat' | 'mark' | 'wait'
+  /** chat | mark | wait | death */
+  kind: 'chat' | 'mark' | 'wait' | 'death'
   userId?: number
   slot?: number
   name?: string

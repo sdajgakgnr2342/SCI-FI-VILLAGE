@@ -2,6 +2,10 @@ const jwt = require('jsonwebtoken');
 const config = require('../config');
 const { query } = require('../db/mysql');
 const partyService = require('../services/partyService');
+const { attachCombatWorld } = require('../game/combatWorld');
+const { normalizeBag, serializeBag, freshBag, START_GOLD, PLAYER_MAX_HP } = require('../game/combatStats');
+const { calcDeathBuildCompensation } = require('../game/shopCatalog');
+const serverService = require('../services/serverService');
 
 /** 兴趣域格子边长（世界坐标） */
 const AOI_CELL = 48;
@@ -97,6 +101,8 @@ function attachPresenceHub(wss) {
       pitch: p.pitch,
       action: p.action || null,
       crouching: Boolean(p.crouching),
+      hp: p.hp,
+      dead: Boolean(p.dead),
       ts: p.ts,
     };
   }
@@ -193,6 +199,9 @@ function attachPresenceHub(wss) {
   function leaveRoom(socket) {
     if (socket.serverId != null) {
       const serverId = Number(socket.serverId);
+      if (socket.userId) {
+        combat.removePlayer(serverId, socket.userId);
+      }
       const room = rooms.get(serverId);
       // 先通知兴趣域内的人
       if (socket.userId && socket.lastPresence) {
@@ -249,6 +258,135 @@ function attachPresenceHub(wss) {
 
   if (typeof tickTimer.unref === 'function') tickTimer.unref();
 
+  function getSocketsForServer(serverId) {
+    const map = new Map();
+    const room = rooms.get(Number(serverId));
+    if (!room) return map;
+    for (const sock of room) {
+      if (sock.userId) map.set(Number(sock.userId), sock);
+    }
+    return map;
+  }
+
+  function broadcastServer(serverId, payload) {
+    const room = rooms.get(Number(serverId));
+    if (!room) return;
+    const raw = JSON.stringify(payload);
+    for (const peer of room) {
+      if (peer.readyState === 1) {
+        try {
+          peer.send(raw);
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
+  function sendToUser(userId, serverId, payload) {
+    const room = rooms.get(Number(serverId));
+    if (!room) return;
+    for (const peer of room) {
+      if (Number(peer.userId) === Number(userId) && peer.readyState === 1) {
+        sendJson(peer, payload);
+        return;
+      }
+    }
+  }
+
+  const combat = attachCombatWorld({
+    getSocketsForServer,
+    broadcastServer,
+    sendToUser,
+    async onPlayerKicked(userId, serverId, info) {
+      let compensation = 0;
+      let clearedBlocks = [];
+      let removedFurnitureIds = [];
+      try {
+        const buildClear = await serverService.clearPlayerBuildsToGrass(serverId, userId);
+        clearedBlocks = buildClear.cleared || [];
+        const furn = combat.removeOwnedFurniture(serverId, userId);
+        removedFurnitureIds = furn.ids || [];
+        compensation = calcDeathBuildCompensation(buildClear.blockIds || [], furn.propIds || []);
+      } catch (err) {
+        console.warn('[combat] death clear builds', err.message);
+      }
+
+      const keep = normalizeBag(info.keepBag || freshBag());
+      const bag = serializeBag({
+        ...keep,
+        gold: (Number(keep.gold) || START_GOLD) + compensation,
+        hp: PLAYER_MAX_HP,
+      });
+
+      const parts = [];
+      if (compensation > 0) parts.push(`建造补偿 ${compensation} 金`);
+      if (info.vaultCount > 0) parts.push(`保险箱 ${info.vaultCount} 把武器`);
+      if (info.overflowGold > 0) parts.push(`超出武器折 ${info.overflowGold} 金`);
+      const message =
+        parts.length > 0
+          ? `您已死亡，装备已掉落。${parts.join('，')}`
+          : info.message || '您已死亡，装备已掉落';
+
+      sendToUser(userId, serverId, {
+        type: 'combat_kick',
+        reason: info.reason,
+        message,
+        compensation,
+        vaultCount: info.vaultCount || 0,
+        overflowGold: info.overflowGold || 0,
+        bag,
+        ts: Date.now(),
+      });
+
+      // 同步清场结果给同服其他人
+      if (clearedBlocks.length) {
+        const CHUNK = 200;
+        for (let i = 0; i < clearedBlocks.length; i += CHUNK) {
+          broadcastServer(serverId, {
+            type: 'blocks',
+            userId,
+            blocks: clearedBlocks.slice(i, i + CHUNK),
+            reason: 'death_clear',
+            ts: Date.now(),
+          });
+        }
+      }
+      if (removedFurnitureIds.length) {
+        broadcastServer(serverId, {
+          type: 'furniture_cleared',
+          userId,
+          ids: removedFurnitureIds,
+          furniture: [...combat.worldOf(serverId).furniture.values()],
+          ts: Date.now(),
+        });
+      }
+
+      try {
+        await serverService.saveInventory(userId, serverId, bag);
+        await serverService.leaveServer(userId, {
+          serverId,
+          inventory: bag,
+        });
+      } catch (err) {
+        console.warn('[combat] kick cleanup', err.message);
+      }
+      const room = rooms.get(Number(serverId));
+      if (room) {
+        for (const peer of [...room]) {
+          if (Number(peer.userId) === Number(userId)) {
+            leaveRoom(peer);
+            try {
+              peer.close();
+            } catch {
+              // ignore
+            }
+          }
+        }
+      }
+    },
+  });
+
   wss.on('connection', (socket) => {
     socket.userId = null;
     socket.username = null;
@@ -297,6 +435,15 @@ function attachPresenceHub(wss) {
           socket.visibleIds = new Set();
           roomOf(serverId).add(socket);
 
+          try {
+            const inv = await serverService.getInventory(userId, serverId);
+            socket.combatBag = serializeBag(normalizeBag(inv));
+            combat.setPlayerBag(serverId, userId, socket.combatBag);
+          } catch {
+            socket.combatBag = serializeBag(freshBag());
+            combat.setPlayerBag(serverId, userId, socket.combatBag);
+          }
+
           sendJson(socket, {
             type: 'auth_ok',
             userId,
@@ -305,6 +452,10 @@ function attachPresenceHub(wss) {
             serverId,
             aoiCell: AOI_CELL,
             aoiRange: AOI_RANGE,
+            combat: {
+              hp: socket.combatBag.hp,
+              bag: socket.combatBag,
+            },
           });
 
           // 等首包 presence 再进格子；先发空 snapshot
@@ -332,10 +483,22 @@ function attachPresenceHub(wss) {
             pitch: Number(msg.pitch) || 0,
             action: msg.action || null,
             crouching: Boolean(msg.crouching),
+            deploying: Boolean(msg.deploying),
+            hp: socket.combatBag?.hp,
+            dead: Boolean(socket.combatBag && socket.combatBag.hp <= 0),
             ts: now,
           };
           socket.lastPresence = presence;
+          socket.deploying = Boolean(msg.deploying);
           placeInGrid(socket, presence.x, presence.z);
+          combat.setPlayerBag(socket.serverId, socket.userId, socket.combatBag || freshBag());
+          const cp = combat.worldOf(socket.serverId).players.get(Number(socket.userId));
+          if (cp && socket.lastPresence) {
+            cp.x = presence.x;
+            cp.y = presence.y;
+            cp.z = presence.z;
+            cp.deploying = Boolean(msg.deploying);
+          }
 
           // 动作变化：立即推给附近，不必等 snapshot
           if (ACTION_PUSH && presence.action !== prevAction) {
@@ -445,6 +608,199 @@ function attachPresenceHub(wss) {
           // 回显自己 + 推队友（无队时至少自己能看见本地，客户端已先插入）
           sendJson(socket, payload);
           await broadcastToPartyMates(socket, payload);
+          return;
+        }
+
+        if (msg.type === 'combat_attack') {
+          const result = combat.handleAttack(socket.serverId, socket.userId, msg);
+          sendJson(socket, { type: 'combat_attack_result', ...result, ts: Date.now() });
+          if (result.ok && result.events?.length) {
+            broadcastAoi(
+              socket,
+              {
+                type: 'combat_fx',
+                userId: socket.userId,
+                events: result.events,
+                ts: Date.now(),
+              },
+              false
+            );
+          }
+          return;
+        }
+
+        if (msg.type === 'combat_use_medkit') {
+          const result = combat.handleUseMedkit(
+            socket.serverId,
+            socket.userId,
+            msg.kind === 'medkit_large' ? 'medkit_large' : 'medkit_small'
+          );
+          if (result.ok) {
+            socket.combatBag = result.bag;
+            try {
+              await serverService.saveInventory(socket.userId, socket.serverId, result.bag);
+            } catch {
+              // ignore
+            }
+          }
+          sendJson(socket, { type: 'combat_bag', ...result, ts: Date.now() });
+          return;
+        }
+
+        if (msg.type === 'combat_claim_crate') {
+          const result = combat.handleClaimCrate(
+            socket.serverId,
+            socket.userId,
+            String(msg.crateId || '')
+          );
+          if (result.ok) {
+            socket.combatBag = result.bag;
+            try {
+              await serverService.saveInventory(socket.userId, socket.serverId, result.bag);
+            } catch {
+              // ignore
+            }
+            broadcastServer(socket.serverId, {
+              type: 'combat_crate_gone',
+              crateId: result.crateId,
+              ts: Date.now(),
+            });
+          }
+          sendJson(socket, { type: 'combat_bag', ...result, ts: Date.now() });
+          return;
+        }
+
+        if (msg.type === 'combat_equip') {
+          const result = combat.handleEquipWeapon(
+            socket.serverId,
+            socket.userId,
+            String(msg.weaponInstanceId || 'fist')
+          );
+          if (result.ok) {
+            socket.combatBag = result.bag;
+            try {
+              await serverService.saveInventory(socket.userId, socket.serverId, result.bag);
+            } catch {
+              // ignore
+            }
+          }
+          sendJson(socket, { type: 'combat_bag', ...result, ts: Date.now() });
+          return;
+        }
+
+        if (msg.type === 'combat_claim_chest') {
+          const result = combat.handleClaimChest(
+            socket.serverId,
+            socket.userId,
+            String(msg.chestId || '')
+          );
+          if (result.ok) {
+            socket.combatBag = result.bag;
+            try {
+              await serverService.saveInventory(socket.userId, socket.serverId, result.bag);
+            } catch {
+              // ignore
+            }
+          }
+          sendJson(socket, { type: 'combat_bag', ...result, ts: Date.now() });
+          return;
+        }
+
+        if (msg.type === 'shop_buy') {
+          const result = combat.handleShopBuy(
+            socket.serverId,
+            socket.userId,
+            String(msg.shopItemId || '')
+          );
+          if (result.ok) {
+            socket.combatBag = result.bag;
+            try {
+              await serverService.saveInventory(socket.userId, socket.serverId, result.bag);
+            } catch {
+              // ignore
+            }
+          }
+          sendJson(socket, { type: 'combat_bag', ...result, ts: Date.now() });
+          return;
+        }
+
+        if (msg.type === 'shop_sell') {
+          const result = combat.handleShopSell(socket.serverId, socket.userId, msg);
+          if (result.ok) {
+            socket.combatBag = result.bag;
+            try {
+              await serverService.saveInventory(socket.userId, socket.serverId, result.bag);
+            } catch {
+              // ignore
+            }
+          }
+          sendJson(socket, { type: 'combat_bag', ...result, ts: Date.now() });
+          return;
+        }
+
+        if (msg.type === 'furniture_place') {
+          const result = combat.handlePlaceFurniture(socket.serverId, socket.userId, msg);
+          if (result.ok) {
+            socket.combatBag = result.bag;
+            try {
+              await serverService.saveInventory(socket.userId, socket.serverId, result.bag);
+            } catch {
+              // ignore
+            }
+            if (result.placed) {
+              broadcastServer(socket.serverId, {
+                type: 'furniture_placed',
+                placed: result.placed,
+                ts: Date.now(),
+              });
+            }
+          }
+          sendJson(socket, { type: 'combat_bag', ...result, ts: Date.now() });
+          return;
+        }
+
+        if (msg.type === 'combat_harvest_loot') {
+          const result = combat.handleHarvestLoot(
+            socket.serverId,
+            socket.userId,
+            String(msg.source || 'dig')
+          );
+          if (result.ok && result.chest) {
+            const bag = combat.getPlayerBag(socket.serverId, socket.userId);
+            if (bag) {
+              socket.combatBag = bag;
+              try {
+                await serverService.saveInventory(socket.userId, socket.serverId, bag);
+              } catch {
+                // ignore
+              }
+            }
+            sendJson(socket, {
+              type: 'combat_loot_chest',
+              chest: result.chest,
+              reason: 'harvest',
+              ts: Date.now(),
+            });
+          }
+          return;
+        }
+
+        if (msg.type === 'combat_sync_bag') {
+          // 客户端材料变更后同步到战斗世界（保留 hp/金币/家具等权威字段）
+          const incoming = normalizeBag(msg.bag);
+          const cur = normalizeBag(socket.combatBag);
+          incoming.hp = cur.hp;
+          incoming.lastDamageAt = cur.lastDamageAt;
+          incoming.gold = cur.gold;
+          incoming.chests = cur.chests;
+          incoming.weapons = cur.weapons.length ? cur.weapons : incoming.weapons;
+          incoming.furniture = cur.furniture;
+          incoming.medkit_small = Math.max(cur.medkit_small, incoming.medkit_small);
+          incoming.medkit_large = Math.max(cur.medkit_large, incoming.medkit_large);
+          incoming.equippedWeapon = cur.equippedWeapon || incoming.equippedWeapon;
+          // 材料以客户端为准（采集权威暂在客户端）
+          socket.combatBag = serializeBag(incoming);
+          combat.setPlayerBag(socket.serverId, socket.userId, socket.combatBag);
           return;
         }
 

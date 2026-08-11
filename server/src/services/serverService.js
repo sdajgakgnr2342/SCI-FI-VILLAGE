@@ -267,6 +267,13 @@ async function joinServer(userId, preferredServerId, opts = {}) {
     if (mate) opts.nearUserId = mate.userId;
   }
 
+  /** 准备舱共享中心（与落点可分离）：组队同舱 */
+  let cabinX = px;
+  let cabinZ = pz;
+  let shareCabin = false;
+  let partySlot = Number(opts.slot);
+  if (!Number.isFinite(partySlot) || partySlot < 0) partySlot = 0;
+
   if (opts.nearUserId) {
     const near = await query(
       `SELECT pos_x AS x, pos_y AS y, pos_z AS z, yaw
@@ -277,10 +284,14 @@ async function joinServer(userId, preferredServerId, opts = {}) {
       [opts.nearUserId, server.id, SESSION_TTL_SEC]
     );
     if (near.length) {
-      const slot = Number(opts.slot) || 1;
+      const slot = Math.max(1, partySlot || 1);
+      partySlot = slot;
+      cabinX = Number(near[0].x);
+      cabinZ = Number(near[0].z);
+      shareCabin = true;
       const ang = (slot * 1.2) % (Math.PI * 2);
-      const rawX = Number(near[0].x) + Math.cos(ang) * (2.2 + (slot % 3) * 0.6);
-      const rawZ = Number(near[0].z) + Math.sin(ang) * (2.2 + (slot % 3) * 0.6);
+      const rawX = cabinX + Math.cos(ang) * (2.2 + (slot % 3) * 0.6);
+      const rawZ = cabinZ + Math.sin(ang) * (2.2 + (slot % 3) * 0.6);
       const safe = nudgeSafeNear(seed, rawX, rawZ, 12);
       px = safe.x;
       pz = safe.z;
@@ -293,6 +304,8 @@ async function joinServer(userId, preferredServerId, opts = {}) {
       pz = Number(anchor.z);
       yaw = Number(anchor.yaw) || 0;
       pitch = Number.isFinite(Number(anchor.pitch)) ? Number(anchor.pitch) : -0.2;
+      cabinX = px;
+      cabinZ = pz;
     } else {
       const picked = pickDispersedSpawn({
         seed,
@@ -306,6 +319,8 @@ async function joinServer(userId, preferredServerId, opts = {}) {
       pz = picked.z;
       yaw = ((userId * 0.7) % (Math.PI * 2)) - Math.PI;
       pitch = -0.2;
+      cabinX = px;
+      cabinZ = pz;
     }
   } else if (hasAnchor) {
     px = Number(anchor.x);
@@ -313,6 +328,8 @@ async function joinServer(userId, preferredServerId, opts = {}) {
     pz = Number(anchor.z);
     yaw = Number(anchor.yaw) || 0;
     pitch = Number.isFinite(Number(anchor.pitch)) ? Number(anchor.pitch) : -0.2;
+    cabinX = px;
+    cabinZ = pz;
   } else {
     const picked = pickDispersedSpawn({
       seed,
@@ -326,7 +343,22 @@ async function joinServer(userId, preferredServerId, opts = {}) {
     pz = picked.z;
     yaw = ((userId * 0.618 + seed * 0.01) % (Math.PI * 2)) - Math.PI;
     pitch = -0.2;
+    cabinX = px;
+    cabinZ = pz;
   }
+
+  // 即使走了锚点恢复，只要队伍里有人在线，准备舱仍对齐队长/队友（同舱活动）
+  const partyCabin = await findPartyCabinAnchor(userId, server.id);
+  if (partyCabin) {
+    cabinX = partyCabin.x;
+    cabinZ = partyCabin.z;
+    shareCabin = true;
+    if (Number.isFinite(partyCabin.slot)) partySlot = partyCabin.slot;
+  }
+
+  // 会话坐标：共享舱时写舱心，便于后进队员对准同一仓
+  const sessionX = shareCabin ? cabinX : px;
+  const sessionZ = shareCabin ? cabinZ : pz;
 
   await query(
     `INSERT INTO server_sessions (server_id, user_id, pos_x, pos_y, pos_z, yaw, pitch)
@@ -340,7 +372,7 @@ async function joinServer(userId, preferredServerId, opts = {}) {
        pos_z = VALUES(pos_z),
        yaw = VALUES(yaw),
        pitch = VALUES(pitch)`,
-    [server.id, userId, px, py, pz, yaw, pitch]
+    [server.id, userId, sessionX, py, sessionZ, yaw, pitch]
   );
 
   await upsertAnchor(userId, server.id, { x: px, y: py, z: pz, yaw, pitch });
@@ -361,6 +393,10 @@ async function joinServer(userId, preferredServerId, opts = {}) {
       z: pz,
       yaw,
       pitch,
+      cabinX,
+      cabinZ,
+      partySlot,
+      shareCabin,
     },
     inventory,
     npcPolicy: NPC_POLICY,
@@ -384,6 +420,61 @@ async function findOnlinePartyMate(userId, serverId) {
     return rows[0] || null;
   } catch {
     // party 表未就绪时忽略
+    return null;
+  }
+}
+
+/**
+ * 组队准备舱锚点：优先在线队长；否则任意在线队友。
+ * 用于后进队员 / PlayView 二次 join 仍对齐同一舱心。
+ */
+async function findPartyCabinAnchor(userId, serverId) {
+  try {
+    const partyRows = await query(
+      `SELECT p.id AS partyId, p.host_user_id AS hostUserId
+       FROM party_members me
+       JOIN parties p ON p.id = me.party_id AND p.status = 'open'
+       WHERE me.user_id = ?
+       LIMIT 1`,
+      [userId]
+    );
+    if (!partyRows.length) return null;
+    const partyId = partyRows[0].partyId;
+    const hostUserId = Number(partyRows[0].hostUserId);
+
+    const members = await query(
+      `SELECT user_id AS userId, role
+       FROM party_members
+       WHERE party_id = ?
+       ORDER BY role = 'host' DESC, user_id ASC`,
+      [partyId]
+    );
+    if (members.length < 2) return null;
+
+    const slot = Math.max(
+      0,
+      members.findIndex((m) => Number(m.userId) === Number(userId))
+    );
+
+    const online = await query(
+      `SELECT s.user_id AS userId, s.pos_x AS x, s.pos_z AS z
+       FROM party_members m
+       JOIN server_sessions s ON s.user_id = m.user_id
+         AND s.server_id = ?
+         AND s.last_seen_at > DATE_SUB(NOW(), INTERVAL ? SECOND)
+       WHERE m.party_id = ? AND m.user_id <> ?
+       ORDER BY m.user_id = ? DESC, m.role = 'host' DESC, m.user_id ASC
+       LIMIT 1`,
+      [serverId, SESSION_TTL_SEC, partyId, userId, hostUserId]
+    );
+    if (!online.length) return null;
+    return {
+      x: Number(online[0].x),
+      z: Number(online[0].z),
+      slot,
+      leadUserId: Number(online[0].userId),
+    };
+  } catch {
     return null;
   }
 }
@@ -527,15 +618,12 @@ async function writeServerBlocks(serverId, userId, blocks) {
   return saved;
 }
 
+const { normalizeBag, serializeBag } = require('../game/combatStats');
+
 const INV_KEYS = ['turf', 'stone', 'wood', 'dry_grass', 'dirt', 'sand'];
 
 function normalizeInventory(raw) {
-  const out = {};
-  for (const k of INV_KEYS) {
-    const n = Number(raw && raw[k]);
-    out[k] = Number.isFinite(n) && n > 0 ? Math.min(999999, Math.floor(n)) : 0;
-  }
-  return out;
+  return serializeBag(normalizeBag(raw));
 }
 
 async function getInventory(userId, serverId) {
@@ -584,6 +672,67 @@ async function getServerBlocksInRange(serverId, min, max) {
   );
 }
 
+/**
+ * 死亡清场：该玩家改过的方块按列压成草坪（最低层 grass，其上 air）
+ * @returns {{ blockIds: string[], cleared: {x:number,y:number,z:number,blockId:string}[] }}
+ */
+async function clearPlayerBuildsToGrass(serverId, userId) {
+  const rows = await query(
+    `SELECT x, y, z, block_id AS blockId
+     FROM server_block_overrides
+     WHERE server_id = ? AND updated_by = ?`,
+    [serverId, userId]
+  );
+  if (!rows.length) {
+    return { blockIds: [], cleared: [] };
+  }
+
+  const blockIds = rows.map((r) => String(r.blockId || 'air'));
+  /** @type {Map<string, {x:number,z:number, ys:number[]}>} */
+  const cols = new Map();
+  for (const r of rows) {
+    const x = Math.floor(Number(r.x));
+    const y = Math.floor(Number(r.y));
+    const z = Math.floor(Number(r.z));
+    const key = `${x},${z}`;
+    let col = cols.get(key);
+    if (!col) {
+      col = { x, z, ys: [] };
+      cols.set(key, col);
+    }
+    col.ys.push(y);
+  }
+
+  /** @type {{x:number,y:number,z:number,blockId:string}[]} */
+  const cleared = [];
+  for (const col of cols.values()) {
+    const minY = Math.min(...col.ys);
+    const maxY = Math.max(...col.ys);
+    for (let y = minY; y <= maxY; y++) {
+      cleared.push({
+        x: col.x,
+        y,
+        z: col.z,
+        blockId: y === minY ? 'grass' : 'air',
+      });
+    }
+  }
+
+  // 先删归属，再写入草坪/空气并标记为系统（updated_by=0），避免下次死亡重复折现
+  await query(`DELETE FROM server_block_overrides WHERE server_id = ? AND updated_by = ?`, [
+    serverId,
+    userId,
+  ]);
+
+  const CHUNK = 200;
+  for (let i = 0; i < cleared.length; i += CHUNK) {
+    const slice = cleared.slice(i, i + CHUNK);
+    await writeServerBlocks(serverId, null, slice);
+  }
+
+  return { blockIds, cleared };
+}
+
 function getNpcPolicy() {
   return NPC_POLICY;
 }
@@ -606,6 +755,7 @@ module.exports = {
   setServerBlocks,
   persistServerBlocks,
   getServerBlocksInRange,
+  clearPlayerBuildsToGrass,
   getInventory,
   saveInventory,
   saveInventoryForSession,

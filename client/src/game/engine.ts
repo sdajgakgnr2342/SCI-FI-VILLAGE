@@ -26,2648 +26,59 @@ import {
   type QualityPreset,
 } from './playSettings'
 import { SquadMarkVisuals, type SquadMark } from './squadMark'
+import { sampleDayNight } from './dayNight'
+import { buildDeployWarmTasks, type DeployWarmTask } from './deployPreload'
+import {
+  type BlockId,
+  type ChunkLod,
+  type ChunkMeshes,
+  type MinimapKind,
+  BLOCK_HARVEST,
+  BLOCK_LABEL,
+  BLOCK_FACES,
+  CHUNK_SIZE,
+  CROUCH_EYE_LERP,
+  DEPLOY_DURATION_SEC,
+  DEPLOY_PAD_HALF,
+  DEPLOY_PAD_HEIGHT,
+  DEPLOY_STREAM_RADIUS,
+  DEPLOY_WALL_H,
+  FEATURE_HEADROOM,
+  InfiniteTerrain,
+  LOAD_RADIUS,
+  MATERIAL_BLOCK,
+  PLAYER_EYE,
+  PLAYER_EYE_CROUCH,
+  PLAYER_HALF_W,
+  PLAYER_HEIGHT,
+  PLAYER_HEIGHT_CROUCH,
+  PRELOAD_RADIUS,
+  REACH_DISTANCE,
+  SURFACE_Y,
+  UNLOAD_RADIUS,
+  WOOD_TRUNK_R,
+  buildChunkGroundProxy,
+  buildChunkMeshes,
+  chunkKey,
+  chunkLodFromDist,
+  disposeChunkMeshes,
+  meshesFromChunkBuffers,
+  pushLeafCluster,
+  pushStylizedRock,
+  pushStylizedShrub,
+  pushWoodCylinder,
+} from './chunkMeshApi'
+
+export type { BlockId, MinimapKind } from './chunkMeshApi'
+export {
+  BLOCK_DISPLAY_LABEL,
+  InfiniteTerrain,
+  MATERIAL_BLOCK,
+  PREVIEW_BLOCK_IDS,
+  SURFACE_Y,
+  buildChunkMeshes,
+} from './chunkMeshApi'
 
-/** 俯视小地图地表种类 */
-export type MinimapKind =
-  | 'grass'
-  | 'dirt'
-  | 'water'
-  | 'sand'
-  | 'stone'
-  | 'tree'
-  | 'wood'
-  | 'shrub'
-  | 'build'
-
-export type BlockId =
-  | 'air'
-  | 'grass'
-  | 'dirt'
-  | 'water'
-  | 'sand'
-  | 'stone'
-  | 'wood'
-  | 'leaves'
-  | 'shrub'
-  | 'turf'
-  | 'plank'
-  | 'thatch'
-  | 'stump'
-  | 'rubble'
-  | 'alloy'
-
-const BLOCK_FACES: Record<
-  Exclude<BlockId, 'air'>,
-  { top: number; side: number; bottom: number; opacity?: number }
-> = {
-  grass: { top: 0x6db33f, side: 0x6db33f, bottom: 0x9a6b3c },
-  turf: { top: 0x6db33f, side: 0x6db33f, bottom: 0x9a6b3c },
-  dirt: { top: 0x9a6b3c, side: 0x845a32, bottom: 0x6e4a2a },
-  sand: { top: 0xe8d7a5, side: 0xdccb90, bottom: 0xcfbe7c },
-  water: { top: 0x3a7a9a, side: 0x2f6a88, bottom: 0x1a4a6a, opacity: 0.62 },
-  stone: { top: 0x8a8e94, side: 0x7a7e84, bottom: 0x6a6e74 },
-  wood: { top: 0xa87848, side: 0x916040, bottom: 0x7a4e28 },
-  leaves: { top: 0x4fb844, side: 0x45a83c, bottom: 0x3a8f32 },
-  shrub: { top: 0x8a9a3a, side: 0x7a8a30, bottom: 0x6a7a28 },
-  plank: { top: 0xc4a06a, side: 0xb89058, bottom: 0xa88048 },
-  thatch: { top: 0xc4b06a, side: 0xb4a05a, bottom: 0xa4904a },
-  stump: { top: 0x6e4220, side: 0x5a3518, bottom: 0x3f2410 },
-  rubble: { top: 0xa8a49a, side: 0x8e8a80, bottom: 0x6e6a62 },
-  alloy: { top: 0xb7b9bc, side: 0xa3a6aa, bottom: 0x8e9196 },
-}
-
-/** 破坏掉落 */
-const BLOCK_HARVEST: Partial<
-  Record<BlockId, { mat: MaterialId | null; needAxe?: boolean; remain?: BlockId }>
-> = {
-  grass: { mat: 'turf', remain: 'dirt' },
-  turf: { mat: 'turf' },
-  dirt: { mat: 'dirt' },
-  sand: { mat: 'sand' },
-  stone: { mat: 'stone', needAxe: true },
-  wood: { mat: 'wood', needAxe: true },
-  leaves: { mat: null },
-  shrub: { mat: 'dry_grass' },
-  plank: { mat: 'wood' },
-  thatch: { mat: 'dry_grass' },
-  stump: { mat: 'wood' },
-  rubble: { mat: 'stone' },
-  alloy: { mat: null },
-}
-
-/** 材料 → 放置方块 */
-export const MATERIAL_BLOCK: Record<MaterialId, BlockId> = {
-  turf: 'turf',
-  stone: 'stone',
-  wood: 'plank',
-  dry_grass: 'thatch',
-  dirt: 'dirt',
-  sand: 'sand',
-}
-
-/** 草坪侧面：上层 1/4 草绿，下层 3/4 土色 */
-const GRASS_SIDE_TOP = 0x6db33f
-const GRASS_SIDE_DIRT = 0x8b5a2b
-/** 草坪绿色层厚度（相对方块高度） */
-const GRASS_CAP = 0.25
-/** 树墩高度 / 碎石摊高度（相对 1 格） */
-const STUMP_H = 0.42
-/** 碎石摊略高一点，避免被选中高亮盖成「透明方块」 */
-const RUBBLE_H = 0.48
-const RUBBLE_INSET = 0.06
-
-const BLOCK_LABEL: Record<BlockId, string> = {
-  air: '',
-  grass: '草地',
-  dirt: '泥土',
-  water: '水',
-  sand: '沙子',
-  stone: '石头',
-  wood: '树木',
-  leaves: '树木',
-  shrub: '灌木',
-  turf: '草皮',
-  plank: '木板',
-  thatch: '干草',
-  stump: '树墩',
-  rubble: '碎石摊',
-  alloy: '合金',
-}
-
-export const BLOCK_DISPLAY_LABEL: Record<BlockId, string> = { ...BLOCK_LABEL }
-
-export const PREVIEW_BLOCK_IDS: Exclude<BlockId, 'air'>[] = [
-  'grass',
-  'dirt',
-  'water',
-  'sand',
-  'stone',
-  'wood',
-  'leaves',
-  'shrub',
-  'turf',
-  'plank',
-  'thatch',
-  'stump',
-  'rubble',
-  'alloy',
-]
-
-const FACES: {
-  dir: [number, number, number]
-  corners: [number, number, number][]
-  shade: 'top' | 'side' | 'bottom'
-}[] = [
-  { dir: [0, 1, 0], corners: [[0, 1, 1], [1, 1, 1], [1, 1, 0], [0, 1, 0]], shade: 'top' },
-  { dir: [0, -1, 0], corners: [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]], shade: 'bottom' },
-  { dir: [1, 0, 0], corners: [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]], shade: 'side' },
-  { dir: [-1, 0, 0], corners: [[0, 0, 1], [0, 1, 1], [0, 1, 0], [0, 0, 0]], shade: 'side' },
-  { dir: [0, 0, 1], corners: [[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]], shade: 'side' },
-  { dir: [0, 0, -1], corners: [[1, 0, 0], [0, 0, 0], [0, 1, 0], [1, 1, 0]], shade: 'side' },
-]
-
-/** 基准地表高度（起伏中心）；兼容旧调用 / 建模预览 */
-export const SURFACE_Y = 4
-/** 起伏振幅（格）：略收一点，减少台阶侧面三角形 */
-const TERRAIN_AMP = 3
-/** 地表最低 / 最高（含溪谷下切） */
-const SURFACE_Y_MIN = 2
-const SURFACE_Y_MAX = 10
-/** 天然树/石相对地表的高度余量 */
-const FEATURE_HEADROOM = 10
-/** 网格扫描最高层（坡顶 + 树冠）；实际按 chunk 局部高度收窄 */
-const MESH_Y_MAX = SURFACE_Y_MAX + FEATURE_HEADROOM + 2
-/** 方块面外扩，消除跳起俯视时的光栅缝（负 inset = 沿法线外扩） */
-const FACE_SEAM_EXPAND = -0.005
-const CHUNK_SIZE = 16
-/** 可视加载半径（块）；雾远与此对齐 */
-const LOAD_RADIUS = 5
-/** 预取缓冲：可视外再挂 lod2，走路时提前建好 */
-const PRELOAD_RADIUS = 7
-/** 进服准备舱：落点周边加载圈（不宜过大，否则舱内建网格会严重卡顿） */
-const DEPLOY_STREAM_RADIUS = 6
-/** 卸载滞回：比预取更大，来回走不反复建拆 */
-const UNLOAD_RADIUS = 9
-/** 进服准备舱倒计时（秒） */
-const DEPLOY_DURATION_SEC = 10
-/** 准备舱相对落点抬高 */
-const DEPLOY_PAD_HEIGHT = 42
-/** 准备舱可行走半宽（格） */
-const DEPLOY_PAD_HALF = 5.5
-/** 空气墙高度 */
-const DEPLOY_WALL_H = 3.4
-/** 准星可交互距离（格）；超出不高亮、不可挖放 */
-const REACH_DISTANCE = 5
-/** 玩家碰撞：眼高、身高、半宽（防穿墙） */
-const PLAYER_EYE = 1.62
-const PLAYER_EYE_CROUCH = 1.15
-const PLAYER_HEIGHT = 1.75
-const PLAYER_HEIGHT_CROUCH = 1.35
-const PLAYER_HALF_W = 0.28
-/** 蹲/起身眼高过渡速度（越大越快） */
-const CROUCH_EYE_LERP = 5.5
-
-function chunkKey(cx: number, cz: number) {
-  return `${cx},${cz}`
-}
-
-function blockKey(x: number, y: number, z: number) {
-  return `${x},${y},${z}`
-}
-
-function hash2(x: number, z: number, seed: number) {
-  let n = Math.imul(x | 0, 374761393) ^ Math.imul(z | 0, 668265263) ^ (seed | 0)
-  n = Math.imul(n ^ (n >>> 13), 1274126177)
-  return (n ^ (n >>> 16)) >>> 0
-}
-
-function smoothstep01(t: number) {
-  const x = Math.min(1, Math.max(0, t))
-  return x * x * (3 - 2 * x)
-}
-
-/** 双线性 value noise，返回 0..1 */
-function valueNoise2D(x: number, z: number, seed: number) {
-  const x0 = Math.floor(x)
-  const z0 = Math.floor(z)
-  const fx = x - x0
-  const fz = z - z0
-  const ux = smoothstep01(fx)
-  const uz = smoothstep01(fz)
-  const v00 = (hash2(x0, z0, seed) >>> 0) / 4294967295
-  const v10 = (hash2(x0 + 1, z0, seed) >>> 0) / 4294967295
-  const v01 = (hash2(x0, z0 + 1, seed) >>> 0) / 4294967295
-  const v11 = (hash2(x0 + 1, z0 + 1, seed) >>> 0) / 4294967295
-  const a = v00 + (v10 - v00) * ux
-  const b = v01 + (v11 - v01) * ux
-  return a + (b - a) * uz
-}
-
-/** 无限起伏世界：缓坡草坪 + 溪谷；自然石头/树/灌木；overrides 记录挖放 */
-export class InfiniteTerrain {
-  readonly seed: number
-  private overrides = new Map<string, BlockId>()
-  private heightCache = new Map<string, number>()
-
-  constructor(seed = 42) {
-    this.seed = seed
-  }
-
-  creekCenterZ(x: number) {
-    return (
-      Math.sin(x * 0.035 + this.seed * 0.001) * 6 +
-      Math.sin(x * 0.012 + 1.7) * 3
-    )
-  }
-
-  creekDist(x: number, z: number) {
-    return Math.abs(z - this.creekCenterZ(x))
-  }
-
-  isCreek(x: number, z: number) {
-    return this.creekDist(x, z) < 1.65
-  }
-
-  isCreekBank(x: number, z: number) {
-    const d = this.creekDist(x, z)
-    return d >= 1.65 && d < 2.6
-  }
-
-  /**
-   * 该柱地表方块顶面整数 Y（草 / 水面所在格）。
-   * 多层噪声缓坡 + 溪谷下切，阶梯坡近似吃鸡起伏。
-   */
-  surfaceHeight(x: number, z: number): number {
-    const ix = Math.floor(x)
-    const iz = Math.floor(z)
-    const key = `${ix},${iz}`
-    const cached = this.heightCache.get(key)
-    if (cached !== undefined) return cached
-
-    const n =
-      valueNoise2D(ix * 0.018, iz * 0.018, this.seed ^ 0xa11) * 0.62 +
-      valueNoise2D(ix * 0.045, iz * 0.045, this.seed ^ 0xb22) * 0.28 +
-      valueNoise2D(ix * 0.11, iz * 0.11, this.seed ^ 0xc33) * 0.1
-    let h = SURFACE_Y + Math.round((n - 0.5) * 2 * TERRAIN_AMP)
-
-    // 溪谷：靠近水道逐渐下切，形成低洼水面
-    const d = this.creekDist(ix + 0.5, iz + 0.5)
-    if (d < 4.2) {
-      const t = 1 - d / 4.2
-      h -= Math.round(smoothstep01(t) * 2)
-    }
-
-    h = Math.max(SURFACE_Y_MIN, Math.min(SURFACE_Y_MAX, h))
-    if (this.heightCache.size > 24000) this.heightCache.clear()
-    this.heightCache.set(key, h)
-    return h
-  }
-
-  /** 树 / 石 / 灌木立在草皮之上的起始层 */
-  featureBaseY(x: number, z: number) {
-    return this.surfaceHeight(x, z) + 1
-  }
-
-  hasOverride(x: number, y: number, z: number) {
-    return this.overrides.has(blockKey(Math.floor(x), Math.floor(y), Math.floor(z)))
-  }
-
-  /** 本 chunk 地表高度范围，用于收窄网格扫描 */
-  chunkSurfaceRange(cx: number, cz: number): { minSy: number; maxSy: number } {
-    const x0 = cx * CHUNK_SIZE
-    const z0 = cz * CHUNK_SIZE
-    let minSy = SURFACE_Y_MAX
-    let maxSy = SURFACE_Y_MIN
-    for (let z = z0; z < z0 + CHUNK_SIZE; z++) {
-      for (let x = x0; x < x0 + CHUNK_SIZE; x++) {
-        const sy = this.surfaceHeight(x, z)
-        if (sy < minSy) minSy = sy
-        if (sy > maxSy) maxSy = sy
-      }
-    }
-    return { minSy, maxSy }
-  }
-
-  sample(x: number, y: number, z: number): BlockId {
-    const ix = Math.floor(x)
-    const iy = Math.floor(y)
-    const iz = Math.floor(z)
-    const o = this.overrides.get(blockKey(ix, iy, iz))
-    if (o !== undefined) return o
-
-    if (iy < 0) return 'dirt'
-
-    const sy = this.surfaceHeight(ix, iz)
-    const featMax = sy + 1 + FEATURE_HEADROOM
-    if (iy > featMax) return 'air'
-
-    const creek = this.isCreek(ix, iz)
-    const bank = this.isCreekBank(ix, iz)
-
-    // 地表之上：天然特征（树石灌木）
-    if (iy > sy && !creek && !bank) {
-      const feat = this.featureBlock(ix, iy, iz)
-      if (feat) return feat
-    }
-
-    if (iy < sy) return 'dirt'
-    if (iy === sy) {
-      if (creek) return 'water'
-      return 'grass'
-    }
-    return 'air'
-  }
-
-  private featureBlock(ix: number, iy: number, iz: number): BlockId | null {
-    const feat = this.featureBaseY(ix, iz)
-    if (iy < feat || iy > feat + FEATURE_HEADROOM) return null
-    if (iy === feat) {
-      const h = hash2(ix, iz, this.seed ^ 0x51)
-      if (h % 47 === 0 && !this.nearTreeTrunk(ix, iz) && !this.nearRock(ix, iz, 2)) {
-        return 'shrub'
-      }
-    }
-    const tree = this.treeAt(ix, iy, iz)
-    if (tree) return tree
-    const rock = this.rockAt(ix, iy, iz)
-    if (rock) return rock
-    return null
-  }
-
-  private nearTreeTrunk(ix: number, iz: number) {
-    for (let dz = -2; dz <= 2; dz++) {
-      for (let dx = -2; dx <= 2; dx++) {
-        if (this.isTreeSeed(ix + dx, iz + dz)) return true
-      }
-    }
-    return false
-  }
-
-  private nearRock(ix: number, iz: number, r: number) {
-    for (let dz = -r; dz <= r; dz++) {
-      for (let dx = -r; dx <= r; dx++) {
-        if (this.rockSeedInfo(ix + dx, iz + dz)) return true
-      }
-    }
-    return false
-  }
-
-  private isTreeSeed(tx: number, tz: number) {
-    if (this.isCreek(tx, tz) || this.isCreekBank(tx, tz)) return false
-    // 略疏，远看树冠不易糊成一片墙
-    return hash2(tx, tz, this.seed ^ 0x11) % 103 === 0
-  }
-
-  private treeAt(ix: number, iy: number, iz: number): BlockId | null {
-    for (let dz = -2; dz <= 2; dz++) {
-      for (let dx = -2; dx <= 2; dx++) {
-        const tx = ix - dx
-        const tz = iz - dz
-        if (!this.isTreeSeed(tx, tz)) continue
-        const h = hash2(tx, tz, this.seed ^ 0x11)
-        const trunkH = 4 + (h % 3)
-        const feat = this.featureBaseY(tx, tz)
-        // 树干从该柱草皮之上开始，不替换地表草方块
-        const top = feat + trunkH
-
-        if (dx === 0 && dz === 0 && iy >= feat && iy < top) return 'wood'
-
-        // 2～3 根侧枝：托住树冠，避免叶子悬空
-        const branch = this.treeBranchOffset(h, dx, dz, iy, top)
-        if (branch) return 'wood'
-
-        // 树冠：中层更密，顶/底略收
-        if (iy < top - 1 || iy > top + 1) continue
-        const ax = Math.abs(dx)
-        const az = Math.abs(dz)
-        if (ax > 2 || az > 2) continue
-        if (dx === 0 && dz === 0 && iy < top) continue
-        const manhattan = ax + az
-        const jitter = (h >> ((ax * 3 + az + iy) & 7)) & 1
-        if (iy === top + 1) {
-          if (manhattan <= 2) return 'leaves'
-          if (manhattan === 3 && jitter === 0) return 'leaves'
-        } else if (iy === top) {
-          if (manhattan <= 3) return 'leaves'
-          if (manhattan === 4 && ax <= 2 && az <= 2) return 'leaves'
-        } else {
-          if (manhattan <= 2) return 'leaves'
-          if (manhattan === 3 && jitter === 0) return 'leaves'
-        }
-      }
-    }
-    return null
-  }
-
-  /** 侧枝相对树心的偏移：斜向上阶梯（近低远高） */
-  private treeBranchOffset(
-    h: number,
-    dx: number,
-    dz: number,
-    iy: number,
-    top: number
-  ): boolean {
-    const dirs: [number, number][] = [
-      [1, 0],
-      [-1, 0],
-      [0, 1],
-      [0, -1],
-    ]
-    const count = 2 + (h % 2)
-    const start = h % dirs.length
-    const step = count === 2 ? 2 : 1
-    for (let i = 0; i < count; i++) {
-      const dir = dirs[(start + i * step) % dirs.length]
-      // 近干较低、远端抬高 → 斜向上
-      if (iy === top - 2 && dx === dir[0] && dz === dir[1]) return true
-      if (iy === top - 1 && dx === dir[0] * 2 && dz === dir[1] * 2) return true
-    }
-    return false
-  }
-
-  private rockSeedInfo(rx: number, rz: number): { size: number } | null {
-    if (this.isCreek(rx, rz) || this.isCreekBank(rx, rz)) return null
-    const h = hash2(rx, rz, this.seed ^ 0x22)
-    if (h % 61 !== 0) return null
-    return { size: 1 + (h % 3) }
-  }
-
-  /**
-   * 天然石堆外观锚点：种子格在草皮之上返回尺寸。
-   * 其它天然石格应跳过方块出面（由锚点画整坨风格化石）。
-   */
-  naturalRockAnchorSize(x: number, y: number, z: number): number | null {
-    if (y !== this.featureBaseY(x, z)) return null
-    if (this.get(x, y, z) !== 'stone') return null
-    const o = this.overrides.get(blockKey(x, y, z))
-    if (o !== undefined) return null // 玩家改过的格不当天然锚点
-    const info = this.rockSeedInfo(x, z)
-    return info ? info.size : null
-  }
-
-  /** 是否属于天然石堆但非锚点（只碰撞、不单独画方块） */
-  isNaturalRockFollower(x: number, y: number, z: number): boolean {
-    if (this.get(x, y, z) !== 'stone') return false
-    const o = this.overrides.get(blockKey(x, y, z))
-    if (o !== undefined) return false
-    if (this.naturalRockAnchorSize(x, y, z) != null) return false
-    return this.rockAt(x, y, z) === 'stone'
-  }
-
-  private rockAt(ix: number, iy: number, iz: number): BlockId | null {
-    for (let dz = -3; dz <= 3; dz++) {
-      for (let dx = -3; dx <= 3; dx++) {
-        const sx = ix - dx
-        const sz = iz - dz
-        const info = this.rockSeedInfo(sx, sz)
-        if (!info) continue
-        const feat = this.featureBaseY(sx, sz)
-        const { size } = info
-        const maxR = size === 1 ? 0 : 1
-        const maxH = size
-        if (Math.abs(dx) > maxR || Math.abs(dz) > maxR) continue
-        const localY = iy - feat
-        if (localY < 0 || localY >= maxH) continue
-        if (size >= 3 && localY >= 2 && Math.abs(dx) + Math.abs(dz) > 0) continue
-        if (size === 2 && localY >= 1 && Math.abs(dx) + Math.abs(dz) > 1) continue
-        return 'stone'
-      }
-    }
-    return null
-  }
-
-  get(x: number, y: number, z: number): BlockId {
-    return this.sample(x, y, z)
-  }
-
-  /**
-   * 俯视小地图用地表种类：草地 / 溪水 / 沙岸 / 石头 / 树 / 灌木 / 建造物。
-   * 溪流用连续坐标并略加宽，避免大图稀疏采样“看不见河”。
-   */
-  minimapKind(x: number, z: number): MinimapKind {
-    const ix = Math.floor(x)
-    const iz = Math.floor(z)
-    const sy = this.surfaceHeight(ix, iz)
-    const hasOverrides = this.overrides.size > 0
-
-    if (hasOverrides) {
-      const oSurf = this.overrides.get(blockKey(ix, sy, iz))
-      if (oSurf !== undefined) {
-        if (oSurf === 'water') return 'water'
-        if (oSurf === 'sand') return 'sand'
-        if (oSurf === 'dirt' || oSurf === 'air' || oSurf === 'stump') return 'dirt'
-        if (oSurf === 'stone' || oSurf === 'rubble' || oSurf === 'alloy') return 'stone'
-        if (
-          oSurf === 'plank' ||
-          oSurf === 'wood' ||
-          oSurf === 'thatch' ||
-          oSurf === 'turf' ||
-          oSurf === 'grass'
-        ) {
-          return oSurf === 'grass' || oSurf === 'turf' ? 'grass' : 'build'
-        }
-      }
-    }
-
-    // 溪流优先于昂贵特征扫描（连续坐标 + 加宽）
-    const cd = Math.abs(z - this.creekCenterZ(x))
-    if (cd < 2.15) return 'water'
-    if (cd < 3.05) return 'sand'
-
-    if (hasOverrides) {
-      const oAbove = this.overrides.get(blockKey(ix, sy + 1, iz))
-      if (oAbove !== undefined && oAbove !== 'air' && oAbove !== 'leaves' && oAbove !== 'water') {
-        if (oAbove === 'shrub') return 'shrub'
-        if (oAbove === 'stone' || oAbove === 'rubble' || oAbove === 'alloy') return 'stone'
-        if (oAbove === 'wood' || oAbove === 'plank') return 'wood'
-        return 'build'
-      }
-    }
-
-    const hs = hash2(ix, iz, this.seed ^ 0x51)
-    // 小地图跳过 nearTree/nearRock，省掉每格数十次哈希
-    if (hs % 47 === 0) return 'shrub'
-
-    // 树：只看本格 + 十字邻格种子，不做 5×5 全扫
-    if (this.isTreeSeed(ix, iz)) return 'wood'
-    if (
-      this.isTreeSeed(ix - 1, iz) ||
-      this.isTreeSeed(ix + 1, iz) ||
-      this.isTreeSeed(ix, iz - 1) ||
-      this.isTreeSeed(ix, iz + 1) ||
-      this.isTreeSeed(ix - 1, iz - 1) ||
-      this.isTreeSeed(ix + 1, iz - 1) ||
-      this.isTreeSeed(ix - 1, iz + 1) ||
-      this.isTreeSeed(ix + 1, iz + 1)
-    ) {
-      return 'tree'
-    }
-
-    // 小地图只标石堆锚点，避免 rockAt 全邻域扫描
-    if (this.rockSeedInfo(ix, iz)) return 'stone'
-
-    if (hasOverrides && this.looksLikePlayerBuild(ix, iz)) return 'build'
-
-    return 'grass'
-  }
-
-  set(x: number, y: number, z: number, id: BlockId) {
-    this.overrides.set(blockKey(Math.floor(x), Math.floor(y), Math.floor(z)), id)
-  }
-
-  solid(x: number, y: number, z: number) {
-    const id = this.get(x, y, z)
-    // 树叶可穿过，不当障碍
-    if (id === 'air' || id === 'water' || id === 'leaves') return false
-    // 灌木 / 天然树干：不占满整格，碰撞见 bodyCollides 造型半径
-    if (id === 'shrub' || id === 'wood') return false
-    // 天然风格石：同上
-    if (id === 'stone' && this.isNaturalStone(x, y, z)) return false
-    return true
-  }
-
-  /** 程序生成石（非玩家放置） */
-  isNaturalStone(x: number, y: number, z: number) {
-    if (this.get(x, y, z) !== 'stone') return false
-    if (this.overrides.has(blockKey(Math.floor(x), Math.floor(y), Math.floor(z)))) return false
-    return this.rockAt(Math.floor(x), Math.floor(y), Math.floor(z)) === 'stone'
-  }
-
-  /**
-   * 该列是否像玩家房屋/墙体：覆盖层里有墙体或地板建材。
-   * 忽略挖空（air）与单纯地表挖掘，避免误判。
-   */
-  looksLikePlayerBuild(ix: number, iz: number): boolean {
-    const x = Math.floor(ix)
-    const z = Math.floor(iz)
-    const sy = this.surfaceHeight(x, z)
-    for (let y = sy; y <= sy + 12; y++) {
-      const o = this.overrides.get(blockKey(x, y, z))
-      if (o === undefined || o === 'air' || o === 'water' || o === 'leaves') continue
-      if (o === 'plank' || o === 'turf') return true
-      if (y >= sy + 1) return true
-    }
-    return false
-  }
-
-  /** 准星打到树干/树叶时，收集整棵树的方块 */
-  treeCellsAt(x: number, y: number, z: number): { x: number; y: number; z: number }[] | null {
-    const id = this.get(x, y, z)
-    let tx = Math.floor(x)
-    let tz = Math.floor(z)
-    if (id === 'wood' || id === 'plank') {
-      // 沿柱找最低树干
-    } else if (id === 'leaves') {
-      let found = false
-      for (let dy = -10; dy <= 2 && !found; dy++) {
-        for (let dz = -2; dz <= 2 && !found; dz++) {
-          for (let dx = -2; dx <= 2 && !found; dx++) {
-            if (this.get(tx + dx, Math.floor(y) + dy, tz + dz) === 'wood') {
-              tx = tx + dx
-              tz = tz + dz
-              found = true
-            }
-          }
-        }
-      }
-      if (!found) return null
-    } else {
-      return null
-    }
-
-    let baseY = -1
-    for (let yy = 0; yy <= MESH_Y_MAX; yy++) {
-      const b = this.get(tx, yy, tz)
-      if (b === 'wood' || b === 'plank') {
-        baseY = yy
-        break
-      }
-    }
-    if (baseY < 0) return null
-    let topY = baseY
-    while (true) {
-      const b = this.get(tx, topY + 1, tz)
-      if (b !== 'wood' && b !== 'plank') break
-      topY++
-    }
-
-    const cells: { x: number; y: number; z: number }[] = []
-    for (let yy = baseY; yy <= topY; yy++) {
-      const b = this.get(tx, yy, tz)
-      if (b === 'wood' || b === 'plank') cells.push({ x: tx, y: yy, z: tz })
-    }
-    // 侧枝木头
-    for (let yy = topY - 2; yy <= topY + 1; yy++) {
-      for (let dz = -2; dz <= 2; dz++) {
-        for (let dx = -2; dx <= 2; dx++) {
-          if (dx === 0 && dz === 0) continue
-          if (this.get(tx + dx, yy, tz + dz) === 'wood') {
-            cells.push({ x: tx + dx, y: yy, z: tz + dz })
-          }
-        }
-      }
-    }
-    for (let yy = topY - 1; yy <= topY + 2; yy++) {
-      for (let dz = -2; dz <= 2; dz++) {
-        for (let dx = -2; dx <= 2; dx++) {
-          if (this.get(tx + dx, yy, tz + dz) === 'leaves') {
-            cells.push({ x: tx + dx, y: yy, z: tz + dz })
-          }
-        }
-      }
-    }
-    return cells.length ? cells : null
-  }
-
-  /** 准星打到石头时，收集整块岩石 */
-  rockCellsAt(x: number, y: number, z: number): { x: number; y: number; z: number }[] | null {
-    const hx = Math.floor(x)
-    const hy = Math.floor(y)
-    const hz = Math.floor(z)
-    if (this.get(hx, hy, hz) !== 'stone') return null
-
-    for (let dz = -3; dz <= 3; dz++) {
-      for (let dx = -3; dx <= 3; dx++) {
-        const sx = hx - dx
-        const sz = hz - dz
-        const info = this.rockSeedInfo(sx, sz)
-        if (!info) continue
-        const cells = this.enumerateRock(sx, sz, info.size)
-        if (cells.some((c) => c.x === hx && c.y === hy && c.z === hz)) {
-          return cells.filter((c) => this.get(c.x, c.y, c.z) === 'stone')
-        }
-      }
-    }
-
-    // 兜底：连通石头
-    const cells: { x: number; y: number; z: number }[] = []
-    const seen = new Set<string>()
-    const q = [{ x: hx, y: hy, z: hz }]
-    while (q.length) {
-      const c = q.pop()!
-      const k = `${c.x},${c.y},${c.z}`
-      if (seen.has(k)) continue
-      seen.add(k)
-      if (this.get(c.x, c.y, c.z) !== 'stone') continue
-      cells.push(c)
-      for (const [ox, oy, oz] of [
-        [1, 0, 0],
-        [-1, 0, 0],
-        [0, 1, 0],
-        [0, -1, 0],
-        [0, 0, 1],
-        [0, 0, -1],
-      ] as const) {
-        q.push({ x: c.x + ox, y: c.y + oy, z: c.z + oz })
-      }
-    }
-    return cells.length ? cells : null
-  }
-
-  /**
-   * 开采用：整块岩石占用的全部格。
-   * 天然石返回种子展开的完整占地（含已挖空的格也要盖 air，避免幽灵石）；
-   * 放置石返回连通分量。
-   */
-  allRockCellsAt(x: number, y: number, z: number): { x: number; y: number; z: number }[] | null {
-    const hx = Math.floor(x)
-    const hy = Math.floor(y)
-    const hz = Math.floor(z)
-    if (this.get(hx, hy, hz) !== 'stone') return null
-
-    for (let dz = -3; dz <= 3; dz++) {
-      for (let dx = -3; dx <= 3; dx++) {
-        const sx = hx - dx
-        const sz = hz - dz
-        const info = this.rockSeedInfo(sx, sz)
-        if (!info) continue
-        const cells = this.enumerateRock(sx, sz, info.size)
-        if (cells.some((c) => c.x === hx && c.y === hy && c.z === hz)) {
-          return cells
-        }
-      }
-    }
-
-    return this.rockCellsAt(hx, hy, hz)
-  }
-
-  /**
-   * 石头高亮/外观应对齐的绘制点：天然石用种子格；放置石堆用几何中心。
-   */
-  rockDrawInfo(
-    x: number,
-    y: number,
-    z: number
-  ): { x: number; y: number; z: number; size: number } | null {
-    const anchor = this.naturalRockAnchorSize(x, y, z)
-    if (anchor != null) return { x, y, z, size: anchor }
-
-    const cells = this.rockCellsAt(x, y, z)
-    if (!cells?.length) return null
-
-    for (const c of cells) {
-      const s = this.naturalRockAnchorSize(c.x, c.y, c.z)
-      if (s != null) return { x: c.x, y: c.y, z: c.z, size: s }
-    }
-
-    // 玩家放置石堆：与 chunk 网格一致，画在几何中心
-    let sx = 0
-    let sy = 0
-    let sz = 0
-    for (const c of cells) {
-      sx += c.x
-      sy += c.y
-      sz += c.z
-    }
-    const n = cells.length
-    const size = n <= 1 ? 1 : n <= 4 ? 2 : 3
-    return { x: sx / n, y: sy / n, z: sz / n, size }
-  }
-
-  private enumerateRock(sx: number, sz: number, size: number) {
-    const cells: { x: number; y: number; z: number }[] = []
-    const feat = this.featureBaseY(sx, sz)
-    const maxR = size === 1 ? 0 : 1
-    const maxH = size
-    for (let dz = -maxR; dz <= maxR; dz++) {
-      for (let dx = -maxR; dx <= maxR; dx++) {
-        for (let localY = 0; localY < maxH; localY++) {
-          if (size >= 3 && localY >= 2 && Math.abs(dx) + Math.abs(dz) > 0) continue
-          if (size === 2 && localY >= 1 && Math.abs(dx) + Math.abs(dz) > 1) continue
-          cells.push({ x: sx + dx, y: feat + localY, z: sz + dz })
-        }
-      }
-    }
-    return cells
-  }
-}
-
-type ChunkLod = 0 | 1 | 2
-type ChunkMeshes = {
-  solid: THREE.Mesh | null
-  water: THREE.Mesh | null
-  grass: THREE.Mesh | null
-  lod: ChunkLod
-}
-
-/** chunk 切比雪夫距离 → LOD：0 近 / 1 中 / 2 远（带宽略宽，少触发重建） */
-function chunkLodFromDist(dist: number): ChunkLod {
-  if (dist <= 2) return 0
-  if (dist <= 4) return 1
-  return 2
-}
-
-function pushFaceQuad(
-  pos: number[],
-  nor: number[],
-  col: number[],
-  idx: number[],
-  vertex: number,
-  corners: [number, number, number][],
-  origin: [number, number, number],
-  normal: [number, number, number],
-  color: THREE.Color,
-  yBias = 0,
-  inset = 0
-) {
-  const [ox, oy, oz] = origin
-  const [nx, ny, nz] = normal
-  // inset>0：叶块内收留缝；inset<0：地块缝外扩；0：造型网格不加缝处理
-  const pull = inset
-  const edge = inset < 0 ? 0.005 : 0
-  let mx = 0
-  let my = 0
-  let mz = 0
-  if (edge > 0) {
-    for (const c of corners) {
-      mx += c[0]
-      my += c[1]
-      mz += c[2]
-    }
-    mx *= 0.25
-    my *= 0.25
-    mz *= 0.25
-  }
-  for (const c of corners) {
-    let lx = c[0]
-    let ly = c[1]
-    let lz = c[2]
-    if (edge > 0) {
-      let ex = lx - mx
-      let ey = ly - my
-      let ez = lz - mz
-      const dn = ex * nx + ey * ny + ez * nz
-      ex -= dn * nx
-      ey -= dn * ny
-      ez -= dn * nz
-      const len = Math.hypot(ex, ey, ez) || 1
-      lx += (ex / len) * edge
-      ly += (ey / len) * edge
-      lz += (ez / len) * edge
-    }
-    pos.push(ox + lx - nx * pull, oy + ly + yBias - ny * pull, oz + lz - nz * pull)
-    nor.push(nx, ny, nz)
-    col.push(color.r, color.g, color.b)
-  }
-  idx.push(vertex, vertex + 1, vertex + 2, vertex, vertex + 2, vertex + 3)
-  return vertex + 4
-}
-
-function pushGrassCardQuad(
-  pos: number[],
-  nor: number[],
-  uv: number[],
-  idx: number[],
-  vertex: number,
-  cx: number,
-  y0: number,
-  cz: number,
-  halfW: number,
-  height: number,
-  yaw: number
-) {
-  const c = Math.cos(yaw)
-  const s = Math.sin(yaw)
-  const rx = -s * halfW
-  const rz = c * halfW
-  const y1 = y0 + height
-  const corners: [number, number, number][] = [
-    [cx - rx, y0, cz - rz],
-    [cx + rx, y0, cz + rz],
-    [cx + rx, y1, cz + rz],
-    [cx - rx, y1, cz - rz],
-  ]
-  const uvs: [number, number][] = [
-    [0, 0],
-    [1, 0],
-    [1, 1],
-    [0, 1],
-  ]
-  for (let i = 0; i < 4; i++) {
-    pos.push(corners[i][0], corners[i][1], corners[i][2])
-    nor.push(c, 0.12, s)
-    uv.push(uvs[i][0], uvs[i][1])
-  }
-  idx.push(vertex, vertex + 1, vertex + 2, vertex, vertex + 2, vertex + 3)
-  return vertex + 4
-}
-
-/** Canvas 生成草丛贴图（一次，全图共享） */
-let grassTuftTex: THREE.CanvasTexture | null = null
-let grassTuftMat: THREE.MeshLambertMaterial | null = null
-
-function getGrassTuftMaterial() {
-  if (grassTuftMat) return grassTuftMat
-  const size = 256
-  const canvas = document.createElement('canvas')
-  canvas.width = size
-  canvas.height = size
-  const ctx = canvas.getContext('2d')!
-  ctx.clearRect(0, 0, size, size)
-
-  // 固定种子，避免每次刷新纹理抖动
-  let seed = 0x9e3779b9
-  const rnd = () => {
-    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0
-    return (seed & 0xffff) / 0x10000
-  }
-
-  const bladeCount = 22
-  for (let i = 0; i < bladeCount; i++) {
-    const x = 70 + rnd() * 116
-    const y = 210 + rnd() * 28
-    const h = 55 + rnd() * 90
-    const w = 2.2 + rnd() * 3.5
-    const red = 28 + rnd() * 45
-    const green = 90 + rnd() * 110
-    ctx.strokeStyle = `rgba(${red | 0},${green | 0},${30 + (rnd() * 25) | 0},${0.75 + rnd() * 0.25})`
-    ctx.lineWidth = w
-    ctx.lineCap = 'round'
-    ctx.beginPath()
-    ctx.moveTo(x, y)
-    ctx.quadraticCurveTo(
-      x + (rnd() - 0.5) * 28,
-      y - h * 0.55,
-      x + (rnd() - 0.5) * 18,
-      y - h
-    )
-    ctx.stroke()
-  }
-
-  grassTuftTex = new THREE.CanvasTexture(canvas)
-  grassTuftTex.colorSpace = THREE.SRGBColorSpace
-  grassTuftTex.magFilter = THREE.LinearFilter
-  grassTuftTex.minFilter = THREE.LinearMipmapLinearFilter
-  grassTuftTex.generateMipmaps = true
-  grassTuftMat = new THREE.MeshLambertMaterial({
-    map: grassTuftTex,
-    alphaTest: 0.32,
-    transparent: false,
-    side: THREE.DoubleSide,
-    depthWrite: true,
-  })
-  return grassTuftMat
-}
-
-/**
- * 卡片草：近处 2～3 簇；中距离抽稀；远处隔 2 格最多 1 簇。
- */
-function pushGrassCards(
-  pos: number[],
-  nor: number[],
-  uv: number[],
-  idx: number[],
-  vertex: number,
-  x: number,
-  y: number,
-  z: number,
-  lod: ChunkLod = 0
-) {
-  const h = hash2(x, z, y ^ 0xb3)
-  // 中：隔一格；远：每 2 格一抽
-  if (lod === 1 && ((x + z) & 1) === 1) return vertex
-  if (lod >= 2 && ((x ^ z) & 3) !== 0) return vertex
-
-  let count: number
-  if (lod >= 2) count = 1
-  else if (lod === 1) count = 1
-  else count = 2 + (h % 2)
-
-  let v = vertex
-  const topY = y + 1
-  const slots: [number, number][] =
-    count === 1
-      ? [[0.5, 0.5]]
-      : count === 2
-        ? [
-            [0.22, 0.22],
-            [0.78, 0.78],
-          ]
-        : [
-            [0.2, 0.28],
-            [0.8, 0.22],
-            [0.5, 0.8],
-          ]
-  const rot = (h % 4) * (Math.PI / 2)
-  const rc = Math.cos(rot)
-  const rs = Math.sin(rot)
-  for (let i = 0; i < count; i++) {
-    const hx = hash2(x + i * 19, z - i * 11, y ^ (0x71 + i * 13))
-    let lx = slots[i][0] - 0.5
-    let lz = slots[i][1] - 0.5
-    const rx = lx * rc - lz * rs
-    const rz = lx * rs + lz * rc
-    const jitter = lod >= 2 ? 0.03 : 0.06
-    const cx = x + 0.5 + rx + (((hx % 17) - 8) / 100) * jitter * 8
-    const cz = z + 0.5 + rz + ((((hx >> 5) % 17) - 8) / 100) * jitter * 8
-    const hgt = 0.2 + ((hx >> 3) % 14) / 100
-    const halfW = 0.18 + ((hx >> 9) % 10) / 100
-    const yaw0 = ((hx % 628) / 100) * 0.5
-    const planes = lod >= 2 ? 2 : 3
-    for (let k = 0; k < planes; k++) {
-      const yaw = yaw0 + (k * Math.PI) / planes
-      const lean = (((hx >> (k + 2)) % 9) - 4) * 0.012
-      v = pushGrassCardQuad(
-        pos,
-        nor,
-        uv,
-        idx,
-        v,
-        cx + lean,
-        topY,
-        cz + lean * 0.6,
-        halfW * (0.9 + (k % 2) * 0.08),
-        hgt * (0.92 + ((hx >> k) % 5) / 40),
-        yaw
-      )
-    }
-  }
-  return v
-}
-
-/** 侧面按 Y 切成上下两段（草坪绿帽 / 土） */
-function sideBandCorners(
-  base: [number, number, number][],
-  y0: number,
-  y1: number
-): [number, number, number][] {
-  return base.map((c) => [c[0], c[1] === 0 ? y0 : y1, c[2]]) as [number, number, number][]
-}
-
-/** 矮方块（树墩/碎石摊）的顶点：高度压缩，碎石摊还略缩小底面 */
-function shortBlockCorners(
-  base: [number, number, number][],
-  y0: number,
-  y1: number,
-  inset = 0
-): [number, number, number][] {
-  const span = 1 - inset * 2
-  return base.map(
-    (c) =>
-      [
-        inset + c[0] * span,
-        y0 + c[1] * (y1 - y0),
-        inset + c[2] * span,
-      ] as [number, number, number]
-  )
-}
-
-/**
- * 弯曲叶瓣：4 段弧面薄片（约 16 顶点/瓣）。
- * 比实心方块叶更自然，顶点量与原十字薄片接近，开销可控。
- */
-function pushCurvedLeafBlade(
-  pos: number[],
-  nor: number[],
-  col: number[],
-  idx: number[],
-  vertex: number,
-  ox: number,
-  oy: number,
-  oz: number,
-  yaw: number,
-  pitch: number,
-  len: number,
-  wid: number,
-  bend: number,
-  color: THREE.Color,
-  segs = 4
-) {
-  const nSeg = Math.max(1, segs | 0)
-  const cy = Math.cos(yaw)
-  const sy = Math.sin(yaw)
-  const cp = Math.cos(pitch)
-  const sp = Math.sin(pitch)
-  // 叶长轴 / 侧向（世界坐标）
-  const fx = sy * cp
-  const fy = sp
-  const fz = cy * cp
-  const rx = cy
-  const rz = -sy
-
-  let v = vertex
-  for (let i = 0; i < nSeg; i++) {
-    const t0 = i / nSeg
-    const t1 = (i + 1) / nSeg
-    const arch0 = Math.sin(Math.PI * t0) * bend
-    const arch1 = Math.sin(Math.PI * t1) * bend
-    const w0 = wid * Math.sin(Math.PI * Math.max(0.08, Math.min(0.92, t0)))
-    const w1 = wid * Math.sin(Math.PI * Math.max(0.08, Math.min(0.92, t1)))
-
-    const p0x = ox + fx * (t0 * len)
-    const p0y = oy + fy * (t0 * len) + arch0
-    const p0z = oz + fz * (t0 * len)
-    const p1x = ox + fx * (t1 * len)
-    const p1y = oy + fy * (t1 * len) + arch1
-    const p1z = oz + fz * (t1 * len)
-
-    const c0: [number, number, number] = [p0x - rx * w0, p0y, p0z - rz * w0]
-    const c1: [number, number, number] = [p0x + rx * w0, p0y, p0z + rz * w0]
-    const c2: [number, number, number] = [p1x + rx * w1, p1y, p1z + rz * w1]
-    const c3: [number, number, number] = [p1x - rx * w1, p1y, p1z - rz * w1]
-
-    // 近似法线：向上偏一点，双面各推一次
-    const nx = -fy * rz
-    const ny = 0.85
-    const nz = fy * rx
-    const inv = 1 / Math.max(0.001, Math.hypot(nx, ny, nz))
-    const n: [number, number, number] = [nx * inv, ny * inv, nz * inv]
-    v = pushFaceQuad(pos, nor, col, idx, v, [c0, c1, c2, c3], [0, 0, 0], n, color)
-    v = pushFaceQuad(pos, nor, col, idx, v, [c0, c3, c2, c1], [0, 0, 0], [-n[0], -n[1], -n[2]], color)
-  }
-  return v
-}
-
-/** 外露叶：近处密；中距离减瓣；远处只画外露叶且更稀 */
-function pushLeafCluster(
-  pos: number[],
-  nor: number[],
-  col: number[],
-  idx: number[],
-  vertex: number,
-  x: number,
-  y: number,
-  z: number,
-  tmp: THREE.Color,
-  exposed: boolean,
-  lod: ChunkLod = 0
-) {
-  if (lod >= 2 && !exposed) return vertex
-  const h = hash2(x, z, y ^ 0x91)
-  let count: number
-  if (lod >= 2) count = 1 + (h % 2)
-  else if (lod === 1) count = exposed ? 3 + (h % 2) : 2
-  else count = exposed ? 10 + (h % 4) : 7 + (h % 3)
-  const bladeSegs = lod >= 2 ? 2 : lod === 1 ? 3 : 4
-  let v = vertex
-  for (let i = 0; i < count; i++) {
-    const hx = hash2(x + i * 5, z + i, y ^ (0x41 + i * 7))
-    const ox = x + 0.02 + ((hx % 96) / 100) * 0.96
-    const oy = y + 0.02 + (((hx >> 6) % 96) / 100) * 0.96
-    const oz = z + 0.02 + (((hx >> 12) % 96) / 100) * 0.96
-    const yaw = ((hx % 628) / 100) * 1.0
-    const pitch = -0.5 + (((hx >> 4) % 65) / 100) * 1.1
-    const len = (lod >= 2 ? 0.5 : 0.78) + ((hx >> 3) % 40) / 100
-    const wid = (lod >= 2 ? 0.16 : 0.24) + ((hx >> 8) % 18) / 100
-    const bend = 0.14 + ((hx >> 2) % 14) / 100
-    tmp.setHex(0x4fb844).multiplyScalar(0.84 + ((hx >> 9) % 26) / 100)
-    v = pushCurvedLeafBlade(
-      pos,
-      nor,
-      col,
-      idx,
-      v,
-      ox,
-      oy,
-      oz,
-      yaw,
-      pitch,
-      len,
-      wid,
-      bend,
-      tmp,
-      bladeSegs
-    )
-  }
-  return v
-}
-
-const WOOD_CYL_SIDES = 8
-const WOOD_TRUNK_R = 0.3
-const WOOD_BRANCH_R = 0.13
-
-/** 空心圆柱外壳（只画外壁，不填实心、不画内壁） */
-function pushCylinderShellY(
-  pos: number[],
-  nor: number[],
-  col: number[],
-  idx: number[],
-  vertex: number,
-  cx: number,
-  y0: number,
-  y1: number,
-  cz: number,
-  radius: number,
-  color: THREE.Color
-) {
-  let v = vertex
-  for (let i = 0; i < WOOD_CYL_SIDES; i++) {
-    const a0 = (i / WOOD_CYL_SIDES) * Math.PI * 2
-    const a1 = ((i + 1) / WOOD_CYL_SIDES) * Math.PI * 2
-    const c0 = Math.cos(a0)
-    const s0 = Math.sin(a0)
-    const c1 = Math.cos(a1)
-    const s1 = Math.sin(a1)
-    const x0 = cx + c0 * radius
-    const z0 = cz + s0 * radius
-    const x1 = cx + c1 * radius
-    const z1 = cz + s1 * radius
-    const nx = (c0 + c1) * 0.5
-    const nz = (s0 + s1) * 0.5
-    const inv = 1 / Math.max(0.001, Math.hypot(nx, nz))
-    // 从外侧看为逆时针（Three.js FrontSide），避免外壁被剔成“空心朝自己”
-    const corners: [number, number, number][] = [
-      [x0, y0, z0],
-      [x0, y1, z0],
-      [x1, y1, z1],
-      [x1, y0, z1],
-    ]
-    v = pushFaceQuad(pos, nor, col, idx, v, corners, [0, 0, 0], [nx * inv, 0, nz * inv], color)
-  }
-  return v
-}
-
-/** 任意方向空心圆筒（斜向上侧枝）；sides 可降以减轻细枝开销 */
-function pushCylinderShellAxis(
-  pos: number[],
-  nor: number[],
-  col: number[],
-  idx: number[],
-  vertex: number,
-  ax: number,
-  ay: number,
-  az: number,
-  bx: number,
-  by: number,
-  bz: number,
-  radius: number,
-  color: THREE.Color,
-  sides = WOOD_CYL_SIDES
-) {
-  const dx = bx - ax
-  const dy = by - ay
-  const dz = bz - az
-  const len = Math.hypot(dx, dy, dz)
-  if (len < 0.05) return vertex
-  const fx = dx / len
-  const fy = dy / len
-  const fz = dz / len
-  let px: number
-  let py: number
-  let pz: number
-  if (Math.abs(fy) < 0.92) {
-    px = fz
-    py = 0
-    pz = -fx
-  } else {
-    px = 1
-    py = 0
-    pz = 0
-  }
-  const pl = Math.hypot(px, py, pz) || 1
-  px /= pl
-  py /= pl
-  pz /= pl
-  const qx = fy * pz - fz * py
-  const qy = fz * px - fx * pz
-  const qz = fx * py - fy * px
-
-  const nSides = Math.max(3, sides | 0)
-  let v = vertex
-  for (let i = 0; i < nSides; i++) {
-    const a0 = (i / nSides) * Math.PI * 2
-    const a1 = ((i + 1) / nSides) * Math.PI * 2
-    const c0 = Math.cos(a0)
-    const s0 = Math.sin(a0)
-    const c1 = Math.cos(a1)
-    const s1 = Math.sin(a1)
-    const r0x = (px * c0 + qx * s0) * radius
-    const r0y = (py * c0 + qy * s0) * radius
-    const r0z = (pz * c0 + qz * s0) * radius
-    const r1x = (px * c1 + qx * s1) * radius
-    const r1y = (py * c1 + qy * s1) * radius
-    const r1z = (pz * c1 + qz * s1) * radius
-    // 从外侧看为逆时针，外壁朝外
-    const corners: [number, number, number][] = [
-      [ax + r0x, ay + r0y, az + r0z],
-      [bx + r0x, by + r0y, bz + r0z],
-      [bx + r1x, by + r1y, bz + r1z],
-      [ax + r1x, ay + r1y, az + r1z],
-    ]
-    const nx = (r0x + r1x) * 0.5
-    const ny = (r0y + r1y) * 0.5
-    const nz = (r0z + r1z) * 0.5
-    const inv = 1 / Math.max(0.001, Math.hypot(nx, ny, nz))
-    v = pushFaceQuad(pos, nor, col, idx, v, corners, [0, 0, 0], [nx * inv, ny * inv, nz * inv], color)
-  }
-  return v
-}
-
-function isTrunkColumnWood(world: InfiniteTerrain, x: number, y: number, z: number) {
-  if (world.get(x, y, z) !== 'wood') return false
-  return world.get(x, y + 1, z) === 'wood' || world.get(x, y - 1, z) === 'wood'
-}
-
-/**
- * 木头：主干只画竖直筒；侧枝由「近干节」画一整根斜筒到枝尖。
- * 枝尖不再单独画，避免与树干分离 / 树叶里悬浮碎枝。
- */
-function pushWoodCylinder(
-  pos: number[],
-  nor: number[],
-  col: number[],
-  idx: number[],
-  vertex: number,
-  x: number,
-  y: number,
-  z: number,
-  world: InfiniteTerrain,
-  tmp: THREE.Color
-) {
-  const above = world.get(x, y + 1, z) === 'wood'
-  const below = world.get(x, y - 1, z) === 'wood'
-  tmp.setHex(BLOCK_FACES.wood.side)
-
-  if (above || below) {
-    return pushCylinderShellY(pos, nor, col, idx, vertex, x + 0.5, y, y + 1, z + 0.5, WOOD_TRUNK_R, tmp)
-  }
-
-  // 侧枝格：找同高相邻的主干
-  const ortho: [number, number][] = [
-    [1, 0],
-    [-1, 0],
-    [0, 1],
-    [0, -1],
-  ]
-  let trunk: [number, number, number] | null = null
-  for (const [ox, oz] of ortho) {
-    const tx = x + ox
-    const tz = z + oz
-    if (isTrunkColumnWood(world, tx, y, tz)) {
-      trunk = [tx, y, tz]
-      break
-    }
-  }
-
-  // 斜上方的外伸枝尖
-  let tip: [number, number, number] | null = null
-  for (const [ox, oz] of ortho) {
-    const fx = x + ox
-    const fy = y + 1
-    const fz = z + oz
-    if (world.get(fx, fy, fz) !== 'wood') continue
-    if (isTrunkColumnWood(world, fx, fy, fz)) continue
-    tip = [fx, fy, fz]
-    break
-  }
-
-  // 只有近干节负责画整根枝；枝尖静默（碰撞仍在）
-  if (!trunk) return vertex
-
-  const ax = trunk[0] + 0.5
-  const ay = trunk[1] + 0.4
-  const az = trunk[2] + 0.5
-  if (tip) {
-    return pushCylinderShellAxis(
-      pos,
-      nor,
-      col,
-      idx,
-      vertex,
-      ax,
-      ay,
-      az,
-      tip[0] + 0.5,
-      tip[1] + 0.65,
-      tip[2] + 0.5,
-      WOOD_BRANCH_R,
-      tmp
-    )
-  }
-  // 单节短枝
-  return pushCylinderShellAxis(
-    pos,
-    nor,
-    col,
-    idx,
-    vertex,
-    ax,
-    ay,
-    az,
-    x + 0.5,
-    y + 0.7,
-    z + 0.5,
-    WOOD_BRANCH_R,
-    tmp
-  )
-}
-
-/** 十二面体模板（detail=0，约 36 三角）——只建一次 */
-const ROCK_TEMPLATE: { verts: Float32Array; indices: Uint16Array } = (() => {
-  const g = new THREE.DodecahedronGeometry(1, 0)
-  const pos = g.getAttribute('position') as THREE.BufferAttribute
-  const idx = g.index
-  const verts = new Float32Array(pos.array as ArrayLike<number>)
-  const indices = idx
-    ? new Uint16Array(idx.array as ArrayLike<number>)
-    : (() => {
-        const n = pos.count
-        const a = new Uint16Array(n)
-        for (let i = 0; i < n; i++) a[i] = i
-        return a
-      })()
-  g.dispose()
-  return { verts, indices }
-})()
-
-function pushTriColored(
-  pos: number[],
-  nor: number[],
-  col: number[],
-  idx: number[],
-  vertex: number,
-  ax: number,
-  ay: number,
-  az: number,
-  bx: number,
-  by: number,
-  bz: number,
-  cx: number,
-  cy: number,
-  cz: number,
-  color: THREE.Color
-) {
-  const e1x = bx - ax
-  const e1y = by - ay
-  const e1z = bz - az
-  const e2x = cx - ax
-  const e2y = cy - ay
-  const e2z = cz - az
-  let nx = e1y * e2z - e1z * e2y
-  let ny = e1z * e2x - e1x * e2z
-  let nz = e1x * e2y - e1y * e2x
-  const inv = 1 / Math.max(0.0001, Math.hypot(nx, ny, nz))
-  nx *= inv
-  ny *= inv
-  nz *= inv
-  pos.push(ax, ay, az, bx, by, bz, cx, cy, cz)
-  nor.push(nx, ny, nz, nx, ny, nz, nx, ny, nz)
-  col.push(color.r, color.g, color.b, color.r, color.g, color.b, color.r, color.g, color.b)
-  idx.push(vertex, vertex + 1, vertex + 2)
-  return vertex + 3
-}
-
-function pushRockBlob(
-  pos: number[],
-  nor: number[],
-  col: number[],
-  idx: number[],
-  vertex: number,
-  ox: number,
-  oy: number,
-  oz: number,
-  sx: number,
-  sy: number,
-  sz: number,
-  yaw: number,
-  seed: number,
-  color: THREE.Color
-) {
-  const c = Math.cos(yaw)
-  const s = Math.sin(yaw)
-  const { verts, indices } = ROCK_TEMPLATE
-  const deformed: number[] = []
-  for (let i = 0; i < verts.length; i += 3) {
-    let vx = verts[i]
-    let vy = verts[i + 1]
-    let vz = verts[i + 2]
-    // 轻量确定性形变（非 Math.random），保持低面数
-    const n =
-      0.82 +
-      0.22 * Math.sin(vx * 3.1 + seed * 0.01) * Math.cos(vz * 2.7 + seed * 0.02) +
-      0.12 * Math.sin(vy * 4.3 + seed * 0.03)
-    vx *= n
-    vy *= n
-    vz *= n
-    const rx = vx * c - vz * s
-    const rz = vx * s + vz * c
-    deformed.push(ox + rx * sx, oy + vy * sy, oz + rz * sz)
-  }
-  let v = vertex
-  for (let i = 0; i < indices.length; i += 3) {
-    const ia = indices[i] * 3
-    const ib = indices[i + 1] * 3
-    const ic = indices[i + 2] * 3
-    v = pushTriColored(
-      pos,
-      nor,
-      col,
-      idx,
-      v,
-      deformed[ia],
-      deformed[ia + 1],
-      deformed[ia + 2],
-      deformed[ib],
-      deformed[ib + 1],
-      deformed[ib + 2],
-      deformed[ic],
-      deformed[ic + 1],
-      deformed[ic + 2],
-      color
-    )
-  }
-  return v
-}
-
-/**
- * 风格化组合石（方案二思路）：主体 + 少量凸起，合批进 chunk。
- * size 1 小 / 2 中 / 3 大；面数很低，避免发热。
- */
-function pushStylizedRock(
-  pos: number[],
-  nor: number[],
-  col: number[],
-  idx: number[],
-  vertex: number,
-  x: number,
-  y: number,
-  z: number,
-  size: number,
-  tmp: THREE.Color,
-  lod: ChunkLod = 0
-) {
-  const h = hash2(Math.floor(x), Math.floor(z), Math.floor(y) ^ 0x22)
-  const hue = 0.07 + ((h % 8) / 100) * 0.5
-  tmp.setHSL(hue, 0.1, 0.32 + ((h >> 4) % 12) / 100)
-  const yaw = ((h % 628) / 100) * 0.5
-
-  // 主体尺度：小 / 中 / 大
-  const base =
-    size === 1 ? 0.42 : size === 2 ? 0.72 : 1.05
-  const sx = base * (0.95 + ((h >> 2) % 10) / 100)
-  const sy = base * (0.55 + ((h >> 6) % 18) / 100)
-  const sz = base * (0.85 + ((h >> 8) % 14) / 100)
-  const cx = x + 0.5
-  const cz = z + 0.5
-  // 底部贴草地顶（y 为石堆底格 / featureBaseY），略埋一点更稳
-  const cy = y + sy * 0.55
-
-  let v = pushRockBlob(pos, nor, col, idx, vertex, cx, cy, cz, sx, sy, sz, yaw, h, tmp)
-
-  // 远景不画凸起；中景只画 1 个
-  const bumps = lod >= 2 ? 0 : lod === 1 ? (size >= 2 ? 1 : 0) : size === 1 ? 0 : size === 2 ? 1 : 2
-  for (let i = 0; i < bumps; i++) {
-    const hx = hash2(Math.floor(x) + i * 7, Math.floor(z) - i * 3, h ^ (0x55 + i))
-    const ang = yaw + ((hx % 628) / 100)
-    const dist = base * (0.35 + ((hx >> 3) % 20) / 100)
-    const bs = base * (0.22 + ((hx >> 5) % 16) / 100)
-    tmp.setHSL(hue, 0.09, 0.28 + ((hx >> 2) % 16) / 100)
-    v = pushRockBlob(
-      pos,
-      nor,
-      col,
-      idx,
-      v,
-      cx + Math.cos(ang) * dist,
-      y + bs * 0.45 + ((hx >> 8) % 10) / 100,
-      cz + Math.sin(ang) * dist,
-      bs,
-      bs * (0.5 + ((hx >> 4) % 12) / 100),
-      bs * (0.7 + ((hx >> 6) % 10) / 100),
-      ang * 0.7,
-      hx,
-      tmp
-    )
-  }
-  return v
-}
-
-const SHRUB_STEM_HEX = 0x6b4a3a
-const SHRUB_STEM_LT_HEX = 0x8b6a4a
-/** 偏亮绿，远看也能读出“叶团” */
-const SHRUB_LEAF_HEX = [0x4fb844, 0x5ec84a, 0x6ad05a, 0x8aaa4a, 0x3f9a38] as const
-const SHRUB_STEM_SIDES = 5
-
-function pushShrubLeafBurst(
-  pos: number[],
-  nor: number[],
-  col: number[],
-  idx: number[],
-  vertex: number,
-  ox: number,
-  oy: number,
-  oz: number,
-  seed: number,
-  count: number,
-  scale: number,
-  tmp: THREE.Color
-) {
-  let v = vertex
-  for (let l = 0; l < count; l++) {
-    const hl = hash2((seed + l * 13) | 0, (seed ^ (l * 97)) | 0, 0xb7 + l)
-    const yaw = ((hl % 628) / 100)
-    const pitch = 0.15 + ((hl >> 4) % 70) / 100
-    const len = (0.16 + ((hl >> 2) % 14) / 100) * scale
-    const wid = (0.055 + ((hl >> 6) % 12) / 100) * scale
-    const bend = 0.1 + ((hl >> 3) % 18) / 100
-    const ox2 = ox + (((hl % 21) - 10) / 100) * 0.12 * scale
-    const oy2 = oy + ((((hl >> 8) % 17) - 4) / 100) * 0.1 * scale
-    const oz2 = oz + ((((hl >> 12) % 21) - 10) / 100) * 0.12 * scale
-    tmp.setHex(SHRUB_LEAF_HEX[hl % SHRUB_LEAF_HEX.length])
-    v = pushCurvedLeafBlade(pos, nor, col, idx, v, ox2, oy2, oz2, yaw, pitch, len, wid, bend, tmp)
-  }
-  return v
-}
-
-/**
- * 风格化灌木：枝干骨架 + 饱满叶团，合批进 chunk solid。
- * lod 0 全量 / 1 减密 / 2 远景剪影。
- */
-function pushStylizedShrub(
-  pos: number[],
-  nor: number[],
-  col: number[],
-  idx: number[],
-  vertex: number,
-  x: number,
-  y: number,
-  z: number,
-  lod: ChunkLod,
-  tmp: THREE.Color
-) {
-  const h = hash2(x, z, y ^ 0x51)
-  const cx = x + 0.5
-  const cz = z + 0.5
-  const baseY = y + 0.02
-  const stemCount = lod >= 2 ? 1 : lod === 1 ? 2 : 4
-  const mainDirs: [number, number, number, number, number][] = [
-    [0.1, 1, 0.1, 0.48, 1],
-    [-0.1, 1, -0.05, 0.42, -1],
-    [0.05, 1, -0.15, 0.52, 1],
-    [-0.08, 1, 0.12, 0.4, -1],
-  ]
-
-  let v = vertex
-  for (let i = 0; i < stemCount; i++) {
-    const b = mainDirs[i]
-    const hx = hash2(x + i * 17, z - i * 9, h ^ (0x33 + i))
-    const dx = b[0] + (((hx % 21) - 10) / 100) * 0.15
-    const dy = b[1]
-    const dz = b[2] + ((((hx >> 4) % 21) - 10) / 100) * 0.15
-    const inv = 1 / Math.max(0.001, Math.hypot(dx, dy, dz))
-    const fx = dx * inv
-    const fy = dy * inv
-    const fz = dz * inv
-    const len = b[3] * (0.92 + ((hx >> 6) % 16) / 100)
-    const curveDir = b[4]
-    const midT = 0.55
-    const midBend = 0.08 * curveDir * (0.6 + ((hx >> 2) % 10) / 10)
-    const midX = cx + fx * len * midT + midBend
-    const midY = baseY + fy * len * midT
-    const midZ = cz + fz * len * midT + midBend * 0.4
-    const tipX = cx + fx * len + midBend * 0.35
-    const tipY = baseY + fy * len
-    const tipZ = cz + fz * len + midBend * 0.15
-    const thick = 0.014 + ((hx >> 8) % 10) / 1000
-    tmp.setHex(SHRUB_STEM_HEX)
-    v = pushCylinderShellAxis(
-      pos,
-      nor,
-      col,
-      idx,
-      v,
-      cx,
-      baseY,
-      cz,
-      midX,
-      midY,
-      midZ,
-      thick,
-      tmp,
-      SHRUB_STEM_SIDES
-    )
-    v = pushCylinderShellAxis(
-      pos,
-      nor,
-      col,
-      idx,
-      v,
-      midX,
-      midY,
-      midZ,
-      tipX,
-      tipY,
-      tipZ,
-      thick * 0.72,
-      tmp,
-      SHRUB_STEM_SIDES
-    )
-
-    // 主枝中段叶簇
-    const midLeaves = lod >= 2 ? 1 : lod === 1 ? 2 : 7
-    v = pushShrubLeafBurst(
-      pos,
-      nor,
-      col,
-      idx,
-      v,
-      midX,
-      midY,
-      midZ,
-      hx ^ 0x55,
-      midLeaves,
-      lod >= 2 ? 0.7 : 1,
-      tmp
-    )
-
-    const subCount = lod >= 2 ? 0 : lod === 1 ? 1 : 3 + (hx % 2)
-    for (let s = 0; s < subCount; s++) {
-      const hs = hash2(x + s * 5, z + i * 3, hx ^ (0x71 + s * 11))
-      const t = 0.28 + ((hs % 55) / 100) * 0.52
-      const sx = cx + fx * len * t + midBend * t
-      const sy = baseY + fy * len * t
-      const sz = cz + fz * len * t + midBend * 0.4 * t
-      let sdx = (((hs % 61) - 30) / 100) * 0.7 + fx * 0.35
-      let sdy = 0.45 + ((hs >> 4) % 40) / 100
-      let sdz = ((((hs >> 8) % 61) - 30) / 100) * 0.7 + fz * 0.35
-      const sl = Math.hypot(sdx, sdy, sdz) || 1
-      sdx /= sl
-      sdy /= sl
-      sdz /= sl
-      const subLen = 0.12 + ((hs >> 2) % 16) / 100
-      const ex = sx + sdx * subLen
-      const ey = sy + sdy * subLen
-      const ez = sz + sdz * subLen
-      tmp.setHex(SHRUB_STEM_LT_HEX)
-      v = pushCylinderShellAxis(
-        pos,
-        nor,
-        col,
-        idx,
-        v,
-        sx,
-        sy,
-        sz,
-        ex,
-        ey,
-        ez,
-        0.005 + ((hs >> 6) % 6) / 1000,
-        tmp,
-        4
-      )
-
-      const leafCount = lod >= 2 ? 1 : lod === 1 ? 2 : 8 + (hs % 3)
-      v = pushShrubLeafBurst(
-        pos,
-        nor,
-        col,
-        idx,
-        v,
-        (sx + ex) * 0.5,
-        (sy + ey) * 0.5,
-        (sz + ez) * 0.5,
-        hs,
-        leafCount,
-        lod >= 2 ? 0.75 : 1.05,
-        tmp
-      )
-    }
-
-    // 主枝顶端叶团
-    const tipLeaves = lod >= 2 ? 1 : lod === 1 ? 2 : 10
-    v = pushShrubLeafBurst(pos, nor, col, idx, v, tipX, tipY, tipZ, h ^ (0xa1 + i * 5), tipLeaves, lod >= 1 ? 0.9 : 1.1, tmp)
-  }
-
-  // 冠层体积填叶 + 基部（近景全量，中景砍半）
-  if (lod < 2) {
-    const canopyN = lod === 0 ? 18 : 4
-    for (let i = 0; i < canopyN; i++) {
-      const hc = hash2(x + i * 3, z - i * 5, h ^ (0xd1 + i))
-      const ang = (hc % 628) / 100
-      const r = 0.08 + ((hc >> 4) % 28) / 100
-      const hy = baseY + 0.18 + ((hc >> 8) % 36) / 100
-      v = pushShrubLeafBurst(
-        pos,
-        nor,
-        col,
-        idx,
-        v,
-        cx + Math.cos(ang) * r,
-        hy,
-        cz + Math.sin(ang) * r,
-        hc,
-        lod === 0 ? 2 : 1,
-        0.95,
-        tmp
-      )
-    }
-    const baseN = lod === 0 ? 10 : 3
-    for (let i = 0; i < baseN; i++) {
-      const hb = hash2(x - i * 7, z + i * 5, h ^ (0xc3 + i))
-      const ang = (hb % 628) / 100
-      const r = 0.05 + ((hb >> 4) % 16) / 100
-      tmp.setHex(SHRUB_LEAF_HEX[hb % SHRUB_LEAF_HEX.length])
-      const yaw = ang + (((hb >> 2) % 20) - 10) / 50
-      const pitch = 0.2 + ((hb >> 6) % 45) / 100
-      v = pushCurvedLeafBlade(
-        pos,
-        nor,
-        col,
-        idx,
-        v,
-        cx + Math.cos(ang) * r,
-        baseY + 0.02,
-        cz + Math.sin(ang) * r,
-        yaw,
-        pitch,
-        0.14 + ((hb >> 3) % 10) / 100,
-        0.05 + ((hb >> 8) % 8) / 100,
-        0.1 + ((hb >> 5) % 14) / 100,
-        tmp
-      )
-    }
-  }
-
-  return v
-}
-
-const CREEK_WATER_HEX = 0x3a7a9a
-const CREEK_WATER_SIDE_HEX = 0x2f6a88
-const CREEK_BED_HEX = 0x6a5a48
-const CREEK_PEBBLE_HEX = [0x8a7a6a, 0x9a8a7a, 0x6a5a4a, 0x6a8a7a] as const
-const CREEK_EDGE_STONE_HEX = [0x7a8a7a, 0x9aaa9a] as const
-
-/**
- * 浅水面：压扁「水管」观感——薄顶面 + 溪缘侧壁。
- * pushFaceQuad 的 corners 相对 origin。
- */
-function pushCreekWaterCell(
-  pos: number[],
-  nor: number[],
-  col: number[],
-  idx: number[],
-  vertex: number,
-  x: number,
-  y: number,
-  z: number,
-  world: InfiniteTerrain,
-  tmp: THREE.Color
-) {
-  const wave = Math.sin(x * 0.55 + z * 0.31) * 0.007
-  const wy = y + 0.036 + wave
-  const bedY = y + 0.004
-  const west = world.get(x - 1, y, z) === 'water' ? 0 : 0.08
-  const east = world.get(x + 1, y, z) === 'water' ? 0 : 0.08
-  const south = world.get(x, y, z - 1) === 'water' ? 0 : 0.08
-  const north = world.get(x, y, z + 1) === 'water' ? 0 : 0.08
-  const x0 = west
-  const x1 = 1 - east
-  const z0 = south
-  const z1 = 1 - north
-  if (x1 <= x0 + 0.04 || z1 <= z0 + 0.04) return vertex
-
-  tmp.setHex(CREEK_WATER_HEX)
-  let v = pushFaceQuad(
-    pos,
-    nor,
-    col,
-    idx,
-    vertex,
-    [
-      [x0, 0, z0],
-      [x1, 0, z0],
-      [x1, 0, z1],
-      [x0, 0, z1],
-    ],
-    [x, wy, z],
-    [0, 1, 0],
-    tmp
-  )
-
-  tmp.setHex(CREEK_WATER_SIDE_HEX)
-  const sideH = wy - bedY
-  if (west > 0) {
-    v = pushFaceQuad(
-      pos,
-      nor,
-      col,
-      idx,
-      v,
-      [
-        [x0, 0, z0],
-        [x0, 0, z1],
-        [x0, sideH, z1],
-        [x0, sideH, z0],
-      ],
-      [x, bedY, z],
-      [-1, 0, 0],
-      tmp
-    )
-  }
-  if (east > 0) {
-    v = pushFaceQuad(
-      pos,
-      nor,
-      col,
-      idx,
-      v,
-      [
-        [x1, 0, z1],
-        [x1, 0, z0],
-        [x1, sideH, z0],
-        [x1, sideH, z1],
-      ],
-      [x, bedY, z],
-      [1, 0, 0],
-      tmp
-    )
-  }
-  if (south > 0) {
-    v = pushFaceQuad(
-      pos,
-      nor,
-      col,
-      idx,
-      v,
-      [
-        [x1, 0, z0],
-        [x0, 0, z0],
-        [x0, sideH, z0],
-        [x1, sideH, z0],
-      ],
-      [x, bedY, z],
-      [0, 0, -1],
-      tmp
-    )
-  }
-  if (north > 0) {
-    v = pushFaceQuad(
-      pos,
-      nor,
-      col,
-      idx,
-      v,
-      [
-        [x0, 0, z1],
-        [x1, 0, z1],
-        [x1, sideH, z1],
-        [x0, sideH, z1],
-      ],
-      [x, bedY, z],
-      [0, 0, 1],
-      tmp
-    )
-  }
-  return v
-}
-
-/** 水底湿沙 + 扁平石子（合批进 solid，可透过水面看见） */
-function pushCreekBedDecor(
-  pos: number[],
-  nor: number[],
-  col: number[],
-  idx: number[],
-  vertex: number,
-  x: number,
-  y: number,
-  z: number,
-  lod: ChunkLod,
-  tmp: THREE.Color
-) {
-  tmp.setHex(CREEK_BED_HEX)
-  let v = pushFaceQuad(
-    pos,
-    nor,
-    col,
-    idx,
-    vertex,
-    [
-      [0.04, 0, 0.04],
-      [0.96, 0, 0.04],
-      [0.96, 0, 0.96],
-      [0.04, 0, 0.96],
-    ],
-    [x, y + 0.005, z],
-    [0, 1, 0],
-    tmp
-  )
-
-  const h = hash2(x, z, y ^ 0x3c)
-  const pebbleN = lod >= 2 ? 1 + (h % 2) : lod === 1 ? 2 + (h % 2) : 3 + (h % 3)
-  for (let i = 0; i < pebbleN; i++) {
-    const hp = hash2(x + i * 11, z - i * 7, h ^ (0x44 + i))
-    const px = x + 0.18 + ((hp % 64) / 100) * 0.64
-    const pz = z + 0.18 + (((hp >> 6) % 64) / 100) * 0.64
-    const py = y + 0.012 + ((hp >> 12) % 8) / 1000
-    const s = 0.03 + ((hp >> 3) % 12) / 200
-    tmp.setHex(CREEK_PEBBLE_HEX[hp % CREEK_PEBBLE_HEX.length])
-    v = pushRockBlob(
-      pos,
-      nor,
-      col,
-      idx,
-      v,
-      px,
-      py,
-      pz,
-      s * (1.1 + ((hp >> 2) % 8) / 20),
-      s * (0.22 + ((hp >> 5) % 10) / 100),
-      s * (0.9 + ((hp >> 8) % 10) / 20),
-      ((hp % 628) / 100) * 0.5,
-      hp,
-      tmp
-    )
-  }
-  return v
-}
-
-/** 溪边平躺小石（仅装饰，不改碰撞格） */
-function pushCreekEdgeStones(
-  pos: number[],
-  nor: number[],
-  col: number[],
-  idx: number[],
-  vertex: number,
-  x: number,
-  y: number,
-  z: number,
-  lod: ChunkLod,
-  tmp: THREE.Color
-) {
-  if (lod >= 2) return vertex
-  const h = hash2(x, z, y ^ 0x5e)
-  if (h % 3 !== 0) return vertex
-  const n = lod === 0 ? 1 + (h % 2) : 1
-  let v = vertex
-  for (let i = 0; i < n; i++) {
-    const hs = hash2(x + i * 9, z - i * 4, h ^ (0x61 + i))
-    const px = x + 0.2 + ((hs % 60) / 100) * 0.6
-    const pz = z + 0.2 + (((hs >> 6) % 60) / 100) * 0.6
-    const s = 0.04 + ((hs >> 3) % 14) / 200
-    tmp.setHex(CREEK_EDGE_STONE_HEX[hs % CREEK_EDGE_STONE_HEX.length])
-    v = pushRockBlob(
-      pos,
-      nor,
-      col,
-      idx,
-      v,
-      px,
-      y + 0.02,
-      pz,
-      s * (1.2 + ((hs >> 2) % 10) / 20),
-      s * (0.18 + ((hs >> 5) % 12) / 100),
-      s * (0.8 + ((hs >> 8) % 12) / 20),
-      ((hs % 628) / 100) * 0.4,
-      hs,
-      tmp
-    )
-  }
-  return v
-}
-
-/**
- * 邻格是否挡住本格这一面。
- * 树干/叶/灌木/天然石是造型物，不占满整格，不能当实心遮挡（否则草坪侧面会被错误裁掉变「透明」）。
- */
-function neighborOccludesFace(
-  world: InfiniteTerrain,
-  nx: number,
-  ny: number,
-  nz: number,
-  neighbor: BlockId
-) {
-  if (neighbor === 'air' || neighbor === 'water') return false
-  if (neighbor === 'leaves' || neighbor === 'shrub' || neighbor === 'wood') return false
-  // 天然石无 override；玩家放置的石头有 override，才当实心遮挡
-  if (neighbor === 'stone' && !world.hasOverride(nx, ny, nz)) return false
-  return true
-}
-
-/**
- * 可贪婪合并的实心建造方块。
- * 不含 grass/turf：侧面要「薄绿皮 + 大块泥土」分层，不能并成纯色大面。
- * 天然石仍走风格化路径。
- */
-const GREEDY_SOLID: ReadonlySet<BlockId> = new Set([
-  'plank',
-  'dirt',
-  'sand',
-  'thatch',
-  'alloy',
-  'stone',
-])
-
-function isGreedySolidCell(world: InfiniteTerrain, id: BlockId, x: number, y: number, z: number) {
-  if (!GREEDY_SOLID.has(id)) return false
-  // 天然石堆仍用风格化网格，不进贪婪方块面
-  if (id === 'stone' && world.isNaturalStone(x, y, z)) return false
-  return true
-}
-
-/**
- * 对实心方块做 6 向贪婪网格。
- * lod≥1 时跳过底面；y 范围按 chunk 地表收窄。
- */
-function pushGreedySolidQuads(
-  world: InfiniteTerrain,
-  cx: number,
-  cz: number,
-  lod: ChunkLod,
-  pos: number[],
-  nor: number[],
-  col: number[],
-  idx: number[],
-  vertex: number,
-  tmp: THREE.Color,
-  yMin: number,
-  yMax: number
-) {
-  const x0 = cx * CHUNK_SIZE
-  const z0 = cz * CHUNK_SIZE
-  const dims = [CHUNK_SIZE, yMax - yMin + 1, CHUNK_SIZE]
-  const origin = [x0, yMin, z0]
-  let v = vertex
-
-  const dirs: { axis: 0 | 1 | 2; sign: 1 | -1; shade: 'top' | 'side' | 'bottom' }[] = [
-    { axis: 0, sign: 1, shade: 'side' },
-    { axis: 0, sign: -1, shade: 'side' },
-    { axis: 1, sign: 1, shade: 'top' },
-    { axis: 1, sign: -1, shade: 'bottom' },
-    { axis: 2, sign: 1, shade: 'side' },
-    { axis: 2, sign: -1, shade: 'side' },
-  ]
-
-  // 复用 mask，避免每片 new Array
-  let mask: (BlockId | null)[] = []
-
-  for (const dir of dirs) {
-    if (lod >= 1 && dir.shade === 'bottom') continue
-
-    const uA = ((dir.axis + 1) % 3) as 0 | 1 | 2
-    const vA = ((dir.axis + 2) % 3) as 0 | 1 | 2
-    const sliceCount = dims[dir.axis]
-    const uSize = dims[uA]
-    const vSize = dims[vA]
-    const maskLen = uSize * vSize
-    if (mask.length < maskLen) mask = new Array(maskLen)
-
-    for (let slice = 0; slice < sliceCount; slice++) {
-      for (let i = 0; i < maskLen; i++) mask[i] = null
-
-      for (let vv = 0; vv < vSize; vv++) {
-        for (let uu = 0; uu < uSize; uu++) {
-          const coord = [0, 0, 0]
-          coord[dir.axis] = slice
-          coord[uA] = uu
-          coord[vA] = vv
-          const x = origin[0] + coord[0]
-          const y = origin[1] + coord[1]
-          const z = origin[2] + coord[2]
-          const id = world.get(x, y, z)
-          if (!isGreedySolidCell(world, id, x, y, z)) continue
-          const nx = x + (dir.axis === 0 ? dir.sign : 0)
-          const ny = y + (dir.axis === 1 ? dir.sign : 0)
-          const nz = z + (dir.axis === 2 ? dir.sign : 0)
-          const neighbor = world.get(nx, ny, nz)
-          if (neighborOccludesFace(world, nx, ny, nz, neighbor)) continue
-          mask[uu + vv * uSize] = id
-        }
-      }
-
-      let n = 0
-      while (n < maskLen) {
-        const id = mask[n]
-        if (id == null) {
-          n++
-          continue
-        }
-        const uu = n % uSize
-        const vv = (n / uSize) | 0
-        let w = 1
-        while (uu + w < uSize && mask[n + w] === id) w++
-        let h = 1
-        grow: while (vv + h < vSize) {
-          for (let k = 0; k < w; k++) {
-            if (mask[uu + k + (vv + h) * uSize] !== id) break grow
-          }
-          h++
-        }
-        for (let dv = 0; dv < h; dv++) {
-          for (let du = 0; du < w; du++) {
-            mask[uu + du + (vv + dv) * uSize] = null
-          }
-        }
-
-        const palette = BLOCK_FACES[id as Exclude<BlockId, 'air'>]
-        tmp.setHex(palette[dir.shade])
-        if (dir.shade === 'side') tmp.multiplyScalar(0.94)
-        if (dir.shade === 'bottom') tmp.multiplyScalar(0.8)
-
-        const plane = origin[dir.axis] + slice + (dir.sign > 0 ? 1 : 0)
-        const corners: [number, number, number][] = [
-          [0, 0, 0],
-          [0, 0, 0],
-          [0, 0, 0],
-          [0, 0, 0],
-        ]
-        const put = (i: number, u: number, vLoc: number) => {
-          const p: [number, number, number] = [0, 0, 0]
-          p[dir.axis] = plane
-          p[uA] = origin[uA] + u
-          p[vA] = origin[vA] + vLoc
-          corners[i] = p
-        }
-        // 与 FACES 同向，保证光照法线朝外
-        if (dir.sign > 0) {
-          put(0, uu, vv)
-          put(1, uu + w, vv)
-          put(2, uu + w, vv + h)
-          put(3, uu, vv + h)
-        } else {
-          put(0, uu, vv + h)
-          put(1, uu + w, vv + h)
-          put(2, uu + w, vv)
-          put(3, uu, vv)
-        }
-
-        const normal: [number, number, number] = [0, 0, 0]
-        normal[dir.axis] = dir.sign
-        v = pushFaceQuad(pos, nor, col, idx, v, corners, [0, 0, 0], normal, tmp, 0, FACE_SEAM_EXPAND)
-        n++
-      }
-    }
-  }
-  return v
-}
-
-/** 供建模预览等外部使用；lod 默认近景全密度 */
-export function buildChunkMeshes(
-  world: InfiniteTerrain,
-  cx: number,
-  cz: number,
-  lod: ChunkLod = 0
-): ChunkMeshes {
-  const x0 = cx * CHUNK_SIZE
-  const z0 = cz * CHUNK_SIZE
-  const x1 = x0 + CHUNK_SIZE
-  const z1 = z0 + CHUNK_SIZE
-
-  const solidPos: number[] = []
-  const solidNor: number[] = []
-  const solidCol: number[] = []
-  const solidIdx: number[] = []
-  let solidV = 0
-
-  const waterPos: number[] = []
-  const waterNor: number[] = []
-  const waterCol: number[] = []
-  const waterIdx: number[] = []
-  let waterV = 0
-
-  const grassPos: number[] = []
-  const grassNor: number[] = []
-  const grassUv: number[] = []
-  const grassIdx: number[] = []
-  let grassV = 0
-
-  const tmp = new THREE.Color()
-  // 按本 chunk 地表收窄 Y：起伏后若仍扫 0..MESH_Y_MAX，CPU 会暴涨
-  const { minSy, maxSy } = world.chunkSurfaceRange(cx, cz)
-  const yMin = Math.max(0, minSy - 1)
-  const yMax = Math.min(MESH_Y_MAX, maxSy + 1 + FEATURE_HEADROOM)
-
-  for (let z = z0; z < z1; z++) {
-    for (let x = x0; x < x1; x++) {
-      for (let y = yMin; y <= yMax; y++) {
-        const id = world.get(x, y, z)
-        if (id === 'air') continue
-
-        if (
-          world.get(x + 1, y, z) !== 'air' &&
-          world.get(x - 1, y, z) !== 'air' &&
-          world.get(x, y + 1, z) !== 'air' &&
-          world.get(x, y - 1, z) !== 'air' &&
-          world.get(x, y, z + 1) !== 'air' &&
-          world.get(x, y, z - 1) !== 'air'
-        ) {
-          // 树叶/木/石/灌木仍要出外观；草坪在树石下也要出顶面（否则镂空露天）
-          if (
-            id !== 'water' &&
-            id !== 'leaves' &&
-            id !== 'wood' &&
-            id !== 'stone' &&
-            id !== 'shrub' &&
-            id !== 'grass' &&
-            id !== 'turf'
-          ) {
-            continue
-          }
-        }
-
-        const palette = BLOCK_FACES[id]
-        const isWater = id === 'water'
-
-        // 小溪：浅水面 + 水底石子（跳过方块水）
-        if (id === 'water') {
-          waterV = pushCreekWaterCell(
-            waterPos,
-            waterNor,
-            waterCol,
-            waterIdx,
-            waterV,
-            x,
-            y,
-            z,
-            world,
-            tmp
-          )
-          solidV = pushCreekBedDecor(
-            solidPos,
-            solidNor,
-            solidCol,
-            solidIdx,
-            solidV,
-            x,
-            y,
-            z,
-            lod,
-            tmp
-          )
-          continue
-        }
-
-        // 溪边草地：平躺装饰石
-        if ((id === 'grass' || id === 'turf') && world.isCreekBank(x, z)) {
-          solidV = pushCreekEdgeStones(
-            solidPos,
-            solidNor,
-            solidCol,
-            solidIdx,
-            solidV,
-            x,
-            y,
-            z,
-            lod,
-            tmp
-          )
-        }
-
-        // 自然草：卡片草单独层；方块面走下方分层侧面（上绿下土）
-        if (id === 'grass' && world.get(x, y + 1, z) === 'air') {
-          grassV = pushGrassCards(grassPos, grassNor, grassUv, grassIdx, grassV, x, y, z, lod)
-        }
-        if (isGreedySolidCell(world, id, x, y, z)) continue
-
-        // 灌木：枝干 + 草叶（跳过方块面）
-        if (id === 'shrub') {
-          solidV = pushStylizedShrub(solidPos, solidNor, solidCol, solidIdx, solidV, x, y, z, lod, tmp)
-          continue
-        }
-
-        // 石头：仅天然石堆用风格化组合石；玩家放置的石头走方块贪婪网格
-        if (id === 'stone') {
-          if (world.isNaturalRockFollower(x, y, z)) continue
-          const size = world.naturalRockAnchorSize(x, y, z)
-          if (size != null) {
-            solidV = pushStylizedRock(
-              solidPos,
-              solidNor,
-              solidCol,
-              solidIdx,
-              solidV,
-              x,
-              y,
-              z,
-              size,
-              tmp,
-              lod
-            )
-            continue
-          }
-        }
-
-        // 树叶：弯曲叶瓣（表面更密，内部也补密度）
-        if (id === 'leaves') {
-          const exposed =
-            world.get(x + 1, y, z) === 'air' ||
-            world.get(x - 1, y, z) === 'air' ||
-            world.get(x, y + 1, z) === 'air' ||
-            world.get(x, y - 1, z) === 'air' ||
-            world.get(x, y, z + 1) === 'air' ||
-            world.get(x, y, z - 1) === 'air'
-          solidV = pushLeafCluster(
-            solidPos,
-            solidNor,
-            solidCol,
-            solidIdx,
-            solidV,
-            x,
-            y,
-            z,
-            tmp,
-            exposed,
-            lod
-          )
-          continue
-        }
-
-        // 木头：空心圆柱（只渲染外壁）
-        if (id === 'wood') {
-          solidV = pushWoodCylinder(
-            solidPos,
-            solidNor,
-            solidCol,
-            solidIdx,
-            solidV,
-            x,
-            y,
-            z,
-            world,
-            tmp
-          )
-          continue
-        }
-
-        for (const face of FACES) {
-          const [dx, dy, dz] = face.dir
-          const nx = x + dx
-          const ny = y + dy
-          const nz = z + dz
-          const neighbor = world.get(nx, ny, nz)
-          if (isWater) {
-            // 只对空气出面，靠透明度透出河床与岸壁颜色
-            if (neighbor !== 'air') continue
-          } else if (neighborOccludesFace(world, nx, ny, nz, neighbor)) {
-            continue
-          }
-
-          const pos = isWater ? waterPos : solidPos
-          const nor = isWater ? waterNor : solidNor
-          const col = isWater ? waterCol : solidCol
-          const idx = isWater ? waterIdx : solidIdx
-          const yBias = isWater && face.shade === 'top' ? -0.08 : 0
-
-          if ((id === 'grass' || id === 'turf') && face.shade === 'side') {
-            // 侧面：薄绿皮 + 大块泥土（不走贪婪，避免整面纯绿）
-            tmp.setHex(GRASS_SIDE_DIRT).multiplyScalar(0.94)
-            solidV = pushFaceQuad(
-              solidPos,
-              solidNor,
-              solidCol,
-              solidIdx,
-              solidV,
-              sideBandCorners(face.corners, 0, 1 - GRASS_CAP),
-              [x, y, z],
-              [dx, dy, dz],
-              tmp,
-              0,
-              FACE_SEAM_EXPAND
-            )
-            tmp.setHex(GRASS_SIDE_TOP).multiplyScalar(0.96)
-            solidV = pushFaceQuad(
-              solidPos,
-              solidNor,
-              solidCol,
-              solidIdx,
-              solidV,
-              sideBandCorners(face.corners, 1 - GRASS_CAP, 1),
-              [x, y, z],
-              [dx, dy, dz],
-              tmp,
-              0,
-              FACE_SEAM_EXPAND
-            )
-            continue
-          }
-
-          // 远景草坪底面可省
-          if ((id === 'grass' || id === 'turf') && face.shade === 'bottom' && lod >= 1) {
-            continue
-          }
-
-          if (!palette) continue
-          tmp.setHex(palette[face.shade])
-          if (face.shade === 'side') tmp.multiplyScalar(0.94)
-          if (face.shade === 'bottom') tmp.multiplyScalar(0.8)
-          // 水面略淡，透出河床与岸色
-          if (isWater) tmp.multiplyScalar(face.shade === 'top' ? 0.95 : 0.85)
-          // 草坪顶面深浅不均，避免纯色平板
-          if ((id === 'grass' || id === 'turf') && face.shade === 'top') {
-            const hv = hash2(x, z, y ^ 0x2a)
-            tmp.multiplyScalar(0.88 + (hv % 22) / 100)
-          }
-
-          // 树墩 / 碎石摊：矮一截，碎石摊像一摊碎石
-          let corners = face.corners
-          let faceYBias = yBias
-          if (id === 'stump') {
-            corners = shortBlockCorners(face.corners, 0, STUMP_H)
-            if (face.shade === 'top' && neighbor !== 'air' && neighbor !== 'water') continue
-          } else if (id === 'rubble') {
-            corners = shortBlockCorners(face.corners, 0, RUBBLE_H, RUBBLE_INSET)
-            if (face.shade === 'top' && neighbor !== 'air' && neighbor !== 'water') continue
-          }
-
-          if (isWater) {
-            waterV = pushFaceQuad(pos, nor, col, idx, waterV, corners, [x, y, z], [dx, dy, dz], tmp, faceYBias)
-          } else {
-            solidV = pushFaceQuad(
-              pos,
-              nor,
-              col,
-              idx,
-              solidV,
-              corners,
-              [x, y, z],
-              [dx, dy, dz],
-              tmp,
-              faceYBias,
-              FACE_SEAM_EXPAND
-            )
-          }
-        }
-      }
-    }
-  }
-
-  solidV = pushGreedySolidQuads(
-    world,
-    cx,
-    cz,
-    lod,
-    solidPos,
-    solidNor,
-    solidCol,
-    solidIdx,
-    solidV,
-    tmp,
-    yMin,
-    yMax
-  )
-
-  const make = (
-    positions: number[],
-    normals: number[],
-    colors: number[],
-    indices: number[],
-    transparent: boolean
-  ) => {
-    if (!positions.length) return null
-    const geo = new THREE.BufferGeometry()
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
-    geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3))
-    geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
-    geo.setIndex(indices)
-    geo.computeBoundingSphere()
-    const mesh = new THREE.Mesh(geo, transparent ? getSharedWaterMat() : getSharedSolidMat())
-    mesh.frustumCulled = true
-    mesh.renderOrder = transparent ? 2 : 0
-    mesh.userData.sharedMat = true
-    mesh.matrixAutoUpdate = false
-    mesh.updateMatrix()
-    return mesh
-  }
-
-  const makeGrass = () => {
-    if (!grassPos.length) return null
-    const geo = new THREE.BufferGeometry()
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(grassPos, 3))
-    geo.setAttribute('normal', new THREE.Float32BufferAttribute(grassNor, 3))
-    geo.setAttribute('uv', new THREE.Float32BufferAttribute(grassUv, 2))
-    geo.setIndex(grassIdx)
-    geo.computeBoundingSphere()
-    const mesh = new THREE.Mesh(geo, getGrassTuftMaterial())
-    mesh.frustumCulled = true
-    mesh.renderOrder = 1
-    mesh.userData.sharedMat = true
-    mesh.matrixAutoUpdate = false
-    mesh.updateMatrix()
-    return mesh
-  }
-
-  return {
-    solid: make(solidPos, solidNor, solidCol, solidIdx, false),
-    water: make(waterPos, waterNor, waterCol, waterIdx, true),
-    grass: makeGrass(),
-    lod,
-  }
-}
-
-function disposeMesh(mesh: THREE.Mesh | null) {
-  if (!mesh) return
-  mesh.geometry.dispose()
-  const mat = mesh.material as THREE.Material
-  // 共享材质（草/solid/water）不销毁
-  if (mesh.userData.sharedMat || mat === grassTuftMat || mat === sharedSolidMat || mat === sharedWaterMat) {
-    return
-  }
-  mat.dispose()
-}
-
-let sharedSolidMat: THREE.MeshLambertMaterial | null = null
-let sharedWaterMat: THREE.MeshLambertMaterial | null = null
-
-function getSharedSolidMat() {
-  if (!sharedSolidMat) {
-    sharedSolidMat = new THREE.MeshLambertMaterial({
-      vertexColors: true,
-      flatShading: true,
-    })
-  }
-  return sharedSolidMat
-}
-
-function getSharedWaterMat() {
-  if (!sharedWaterMat) {
-    sharedWaterMat = new THREE.MeshLambertMaterial({
-      vertexColors: true,
-      flatShading: true,
-      transparent: true,
-      opacity: 0.62,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    })
-  }
-  return sharedWaterMat
-}
-
-function disposeChunkMeshes(meshes: ChunkMeshes) {
-  disposeMesh(meshes.solid)
-  disposeMesh(meshes.water)
-  disposeMesh(meshes.grass)
-}
-
-/** 小溪流水高光粒子（沿中心线漂移，仅近距） */
 class CreekFlowParticles {
   readonly points: THREE.Points
   private readonly data: { x: number; offset: number; speed: number; phase: number }[] = []
@@ -2805,22 +216,42 @@ class SkyDecor {
   readonly group = new THREE.Group()
   private clouds: THREE.Group[] = []
   private sunMesh: THREE.Mesh
+  private sunGlow: THREE.Mesh
   private t = 0
+  private readonly daySun = new THREE.Color(0xfff1a8)
+  private readonly nightSun = new THREE.Color(0xc8d4ee)
+  private readonly dayGlow = new THREE.Color(0xffe08a)
+  private readonly nightGlow = new THREE.Color(0x9eb0d0)
+  private readonly dayCloud = new THREE.Color(0xf4f8ff)
+  private readonly nightCloud = new THREE.Color(0x8a9bb8)
+  private readonly tmp = new THREE.Color()
 
   constructor() {
     // 太阳圆盘
     const sunGeo = new THREE.SphereGeometry(4.5, 16, 16)
-    const sunMat = new THREE.MeshBasicMaterial({ color: 0xfff1a8 })
+    const sunMat = new THREE.MeshBasicMaterial({
+      color: 0xfff1a8,
+      transparent: true,
+      opacity: 1,
+      depthWrite: false,
+      fog: false,
+    })
     this.sunMesh = new THREE.Mesh(sunGeo, sunMat)
     this.sunMesh.position.set(40, 55, -30)
     this.group.add(this.sunMesh)
 
-    const glow = new THREE.Mesh(
+    this.sunGlow = new THREE.Mesh(
       new THREE.SphereGeometry(7, 16, 16),
-      new THREE.MeshBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0.25 })
+      new THREE.MeshBasicMaterial({
+        color: 0xffe08a,
+        transparent: true,
+        opacity: 0.25,
+        depthWrite: false,
+        fog: false,
+      })
     )
-    glow.position.copy(this.sunMesh.position)
-    this.group.add(glow)
+    this.sunGlow.position.copy(this.sunMesh.position)
+    this.group.add(this.sunGlow)
 
     // 几朵白云（扁椭圆组合）
     for (let i = 0; i < 8; i++) {
@@ -2841,12 +272,33 @@ class SkyDecor {
     return createSkyCloud()
   }
 
+  /** dayness: 0 夜 → 1 昼；只调可见外观，不加月亮/星星 */
+  setDayness(dayness: number) {
+    const d = Math.max(0, Math.min(1, dayness))
+    const sunMat = this.sunMesh.material as THREE.MeshBasicMaterial
+    sunMat.color.copy(this.nightSun).lerp(this.daySun, d)
+    sunMat.opacity = 0.22 + 0.78 * d
+    const glowMat = this.sunGlow.material as THREE.MeshBasicMaterial
+    glowMat.color.copy(this.nightGlow).lerp(this.dayGlow, d)
+    glowMat.opacity = 0.06 + 0.19 * d
+
+    const cloudOpacity = 0.28 + 0.62 * d
+    this.tmp.copy(this.nightCloud).lerp(this.dayCloud, d)
+    for (const cloud of this.clouds) {
+      cloud.traverse((obj) => {
+        if (!(obj instanceof THREE.Mesh)) return
+        const mat = obj.material as THREE.MeshBasicMaterial
+        mat.color.copy(this.tmp)
+        mat.opacity = cloudOpacity
+      })
+    }
+  }
+
   update(dt: number, cam: THREE.Vector3) {
     this.t += dt
     // 太阳相对相机保持远距方位，形成「天空中的太阳」
     this.sunMesh.position.set(cam.x + 55, cam.y + 48, cam.z - 35)
-    const glow = this.group.children[1]
-    if (glow) glow.position.copy(this.sunMesh.position)
+    this.sunGlow.position.copy(this.sunMesh.position)
 
     for (const c of this.clouds) {
       c.position.x += c.userData.speed * dt
@@ -2879,9 +331,24 @@ export class GameEngine {
   private idleMountRic = 0
   private idleMountTo = 0
   private mountSortDirty = true
+  /** Worker 建网格：主线程只挂结果 */
+  private meshWorker: Worker | null = null
+  private meshWorkerFailed = false
+  private meshJobSeq = 0
+  private inflightMesh = 0
+  private pendingMeshJobs = new Map<
+    number,
+    { key: string; cx: number; cz: number; lod: ChunkLod; gen: number }
+  >()
+  /** chunk 代数：卸载/重建时递增，丢弃过期 Worker 结果 */
+  private chunkGen = new Map<string, number>()
+  private static readonly MAX_INFLIGHT_MESH = 4
   /** 本帧是否在明显移动（推迟 LOD 重建） */
   private movingThisFrame = false
   private selectFrame = 0
+  /** 上次用于挂载排序的视线，转视角时重排队列 */
+  private lookHintX = 0
+  private lookHintZ = 1
   /** 流式加载锚点（准备舱期间对着落点刷图，不跟相机） */
   private streamFocusX = Number.NaN
   private streamFocusZ = Number.NaN
@@ -2899,21 +366,34 @@ export class GameEngine {
     endsAt: number
     /** 上次推 UI 的时刻，节流 onProgress */
     lastUiAt: number
+    /** 上次强制复扫地图 */
+    lastStreamAt: number
+    /** 倒计时叮声：已播过的整秒 ceil(remain) */
+    lastTickSec: number
+    /** 投送后资源预热队列 */
+    warmTasks: DeployWarmTask[]
+    warmDone: number
+    warmLabel: string
     onProgress?: (remain: number, timeProgress: number) => void
     onComplete?: () => void
   } | null = null
   private static readonly REBUILD_PER_FRAME = 1
-  private static readonly MOUNT_PER_FRAME = 1
-  private static readonly IDLE_MOUNT_MAX = 2
+  private static readonly MOUNT_PER_FRAME = 2
+  private static readonly IDLE_MOUNT_MAX = 3
   /** 单帧建网格时间预算（ms），超出则本帧不再挂/重建 */
-  private static readonly MESH_BUDGET_MS = 5.5
+  private static readonly MESH_BUDGET_MS = 4
   /** 准备舱：每帧少挂、严控预算，优先保证读秒流畅 */
   private static readonly DEPLOY_MOUNT_PER_FRAME = 2
-  private static readonly DEPLOY_MESH_BUDGET_MS = 6.5
+  private static readonly DEPLOY_MESH_BUDGET_MS = 5
   private static readonly DEPLOY_FORCE_MOUNT = 3
+  /** 准备舱每帧最多跑几个预热任务 */
+  private static readonly DEPLOY_WARM_PER_TICK = 1
   private keys = new Set<string>()
   private yaw = 0
   private pitch = -0.28
+  /** 枪械开火后坐（叠加到 pitch/yaw，快速衰减） */
+  private recoilPitch = 0
+  private recoilYaw = 0
   private velocityY = 0
   private onGround = false
   private pointerLocked = false
@@ -2925,8 +405,27 @@ export class GameEngine {
   private moveForward = 0
   private moveStrafe = 0
   private jumpQueued = false
+  /** 战斗：重伤禁跑 / 死亡锁输入 */
+  combatSlow = false
+  combatLocked = false
+  onHarvestLoot: ((source: 'chop' | 'mine' | 'dig' | 'clear') => void) | null = null
   private sky: SkyDecor
   private sunLight: THREE.DirectionalLight
+  private hemiLight: THREE.HemisphereLight
+  private ambientLight: THREE.AmbientLight
+  private readonly dayBg = new THREE.Color(0x87ceeb)
+  private readonly nightBg = new THREE.Color(0x1c2a3d)
+  private readonly dayFog = new THREE.Color(0xc5e3f5)
+  private readonly nightFog = new THREE.Color(0x2a3a52)
+  private readonly dayHemiSky = new THREE.Color(0xdff2ff)
+  private readonly nightHemiSky = new THREE.Color(0x6a7fa0)
+  private readonly dayHemiGround = new THREE.Color(0x8fbf6a)
+  private readonly nightHemiGround = new THREE.Color(0x3a4a38)
+  private readonly daySunColor = new THREE.Color(0xfff4e0)
+  private readonly nightSunColor = new THREE.Color(0xa8b8d8)
+  private readonly dayAmbient = new THREE.Color(0xffffff)
+  private readonly nightAmbient = new THREE.Color(0xb8c8e0)
+  private readonly bgColor = new THREE.Color()
   private lastChunkCX = Number.NaN
   private lastChunkCZ = Number.NaN
   /** 水平移动方向提示（预取挂载：前方优先） */
@@ -3038,15 +537,17 @@ export class GameEngine {
     this.renderer.domElement.style.touchAction = 'none'
     container.appendChild(this.renderer.domElement)
 
-    const hemi = new THREE.HemisphereLight(0xdff2ff, 0x8fbf6a, 0.9)
-    this.scene.add(hemi)
+    this.hemiLight = new THREE.HemisphereLight(0xdff2ff, 0x8fbf6a, 0.9)
+    this.scene.add(this.hemiLight)
     this.sunLight = new THREE.DirectionalLight(0xfff4e0, 1.2)
     this.sunLight.position.set(40, 60, -20)
     this.scene.add(this.sunLight)
-    this.scene.add(new THREE.AmbientLight(0xffffff, 0.32))
+    this.ambientLight = new THREE.AmbientLight(0xffffff, 0.32)
+    this.scene.add(this.ambientLight)
 
     this.sky = new SkyDecor()
     this.scene.add(this.sky.group)
+    this.applyDayNight()
 
     this.world = new InfiniteTerrain(seed)
     this.scene.add(this.chunkGroup)
@@ -3110,48 +611,73 @@ export class GameEngine {
   }
 
   private streamChunks(force = false) {
+    const deploying = Boolean(this.deploy?.active)
+    const foci: { x: number; z: number }[] = []
     const fx = Number.isFinite(this.streamFocusX) ? this.streamFocusX : this.camera.position.x
     const fz = Number.isFinite(this.streamFocusZ) ? this.streamFocusZ : this.camera.position.z
-    const cx = Math.floor(fx / CHUNK_SIZE)
-    const cz = Math.floor(fz / CHUNK_SIZE)
-    if (!force && cx === this.lastChunkCX && cz === this.lastChunkCZ) return
-    this.lastChunkCX = cx
-    this.lastChunkCZ = cz
+    foci.push({ x: fx, z: fz })
+    // 舱心与落点不同时，两边都铺图（投送后脚下有地形）
+    if (deploying && this.deploy) {
+      const dx = this.deploy.dest.x
+      const dz = this.deploy.dest.z
+      if (Math.hypot(dx - fx, dz - fz) > CHUNK_SIZE * 0.5) {
+        foci.push({ x: dx, z: dz })
+      }
+    }
 
-    const deploying = Boolean(this.deploy?.active)
+    const primaryCx = Math.floor(fx / CHUNK_SIZE)
+    const primaryCz = Math.floor(fz / CHUNK_SIZE)
+    if (!force && primaryCx === this.lastChunkCX && primaryCz === this.lastChunkCZ) {
+      // 准备舱 LOD 升级靠 tickDeploy 里的强制复扫
+      return
+    }
+    this.lastChunkCX = primaryCx
+    this.lastChunkCZ = primaryCz
+
     const streamR = deploying ? DEPLOY_STREAM_RADIUS : PRELOAD_RADIUS
-    const unloadR = deploying ? DEPLOY_STREAM_RADIUS + 1 : UNLOAD_RADIUS
+    const unloadR = deploying ? Math.max(DEPLOY_STREAM_RADIUS + 2, PRELOAD_RADIUS) : UNLOAD_RADIUS
     const loadR2 = LOAD_RADIUS * LOAD_RADIUS + 1
     const streamR2 = streamR * streamR + 1
     const needed = new Set<string>()
     const pending: { cx: number; cz: number; lod: ChunkLod; dist: number; ahead: number }[] = []
 
-    for (let dz = -streamR; dz <= streamR; dz++) {
-      for (let dx = -streamR; dx <= streamR; dx++) {
-        const r2 = dx * dx + dz * dz
-        if (r2 > streamR2) continue
-        const key = chunkKey(cx + dx, cz + dz)
-        needed.add(key)
-        const dist = Math.max(Math.abs(dx), Math.abs(dz))
-        const visible = r2 <= loadR2
-        // 可视内按距离 LOD；缓冲环只挂 lod2，且不因离开可视而降级重建
-        let wantLod: ChunkLod = visible ? chunkLodFromDist(dist) : 2
-        // 准备舱：强制更粗 LOD，避免脚下近景全密度建树叶/草把主线程打爆
-        if (deploying) {
-          wantLod = (dist <= 2 ? 1 : 2) as ChunkLod
-        }
-        const existing = this.chunks.get(key)
-        if (!existing) {
-          const ahead = dx * this.moveHintX + dz * this.moveHintZ
-          pending.push({ cx: cx + dx, cz: cz + dz, lod: wantLod, dist, ahead })
-        } else if (visible && wantLod < existing.lod) {
-          // 只升级不降级，避免走路时反复重建
-          this.rebuildQueue.add(key)
+    for (const focus of foci) {
+      const cx = Math.floor(focus.x / CHUNK_SIZE)
+      const cz = Math.floor(focus.z / CHUNK_SIZE)
+      for (let dz = -streamR; dz <= streamR; dz++) {
+        for (let dx = -streamR; dx <= streamR; dx++) {
+          const r2 = dx * dx + dz * dz
+          if (r2 > streamR2) continue
+          const key = chunkKey(cx + dx, cz + dz)
+          needed.add(key)
+          const dist = Math.max(Math.abs(dx), Math.abs(dz))
+          const visible = r2 <= loadR2
+          let wantLod: ChunkLod = visible ? chunkLodFromDist(dist) : 2
+          if (deploying) {
+            // 前半粗 LOD 保流畅，后半逐步升到可玩密度
+            const progress =
+              this.deploy && this.deploy.duration > 0
+                ? 1 - this.deploy.remain / this.deploy.duration
+                : 0
+            if (progress < 0.45) {
+              wantLod = (dist <= 2 ? 1 : 2) as ChunkLod
+            } else if (progress < 0.75) {
+              wantLod = (dist <= 1 ? 0 : dist <= 3 ? 1 : 2) as ChunkLod
+            } else {
+              wantLod = visible ? chunkLodFromDist(dist) : 2
+            }
+          }
+          const existing = this.chunks.get(key)
+          if (!existing) {
+            const ahead = dx * this.moveHintX + dz * this.moveHintZ
+            pending.push({ cx: cx + dx, cz: cz + dz, lod: wantLod, dist, ahead })
+          } else if (wantLod < existing.lod) {
+            this.rebuildQueue.add(key)
+          }
         }
       }
     }
 
-    // 近的、朝前的先挂
     pending.sort(
       (a, b) =>
         a.dist - b.dist - (a.ahead - b.ahead) * 2.2 || a.cx - b.cx || a.cz - b.cz
@@ -3160,26 +686,30 @@ export class GameEngine {
       this.enqueueMount(p.cx, p.cz, p.lod)
     }
     if (force) {
-      // 出生/进舱：有限冲刷，始终走时间预算，禁止一帧挂十几个
       this.flushMountQueue(deploying ? GameEngine.DEPLOY_FORCE_MOUNT : 8)
     }
 
     for (const [key, meshes] of this.chunks) {
       const [sx, sz] = key.split(',').map(Number)
-      const dist = Math.max(Math.abs(sx - cx), Math.abs(sz - cz))
-      if (!needed.has(key) && dist > unloadR) {
+      let minDist = Infinity
+      for (const focus of foci) {
+        const cx = Math.floor(focus.x / CHUNK_SIZE)
+        const cz = Math.floor(focus.z / CHUNK_SIZE)
+        minDist = Math.min(minDist, Math.max(Math.abs(sx - cx), Math.abs(sz - cz)))
+      }
+      if (!needed.has(key) && minDist > unloadR) {
         this.unmountChunk(key, meshes)
         this.rebuildQueue.delete(key)
         this.mountQueued.delete(key)
       }
     }
-    // 清掉已不需要的挂载预约（离开预取圈）
     this.mountQueue = this.mountQueue.filter((m) => {
       const key = chunkKey(m.cx, m.cz)
       if (needed.has(key)) return true
       this.mountQueued.delete(key)
       return false
     })
+    this.world.pruneVoxelCache(primaryCx, primaryCz, unloadR + 2)
   }
 
   private enqueueMount(cx: number, cz: number, lod: ChunkLod) {
@@ -3219,8 +749,9 @@ export class GameEngine {
     const budget = deploying ? GameEngine.DEPLOY_MESH_BUDGET_MS : GameEngine.MESH_BUDGET_MS
     let n = 0
     while (this.mountQueue.length && n < limit) {
-      // 始终限时：准备舱强制冲刷也不能把帧打爆
-      if (n > 0 && performance.now() - t0 > budget) break
+      if (this.inflightMesh >= GameEngine.MAX_INFLIGHT_MESH) break
+      // Worker 路径几乎不占预算；同步回退仍限时
+      if (n > 0 && this.meshWorkerFailed && performance.now() - t0 > budget) break
       const job = this.mountQueue.shift()!
       const key = chunkKey(job.cx, job.cz)
       this.mountQueued.delete(key)
@@ -3229,7 +760,9 @@ export class GameEngine {
       const dz = Number.isFinite(pcz) ? job.cz - pcz : 0
       const dist = Math.max(Math.abs(dx), Math.abs(dz))
       const visible = dx * dx + dz * dz <= loadR2
-      const lod: ChunkLod = visible ? chunkLodFromDist(dist) : 2
+      let lod: ChunkLod = visible ? chunkLodFromDist(dist) : 2
+      // 走路时新块不要上全密度，等停稳再升级
+      if (this.movingThisFrame && !deploying && lod === 0 && dist > 0) lod = 1
       this.mountChunk(job.cx, job.cz, lod)
       n++
     }
@@ -3277,9 +810,102 @@ export class GameEngine {
     }
   }
 
+  private ensureMeshWorker() {
+    if (this.meshWorker || this.meshWorkerFailed) return
+    try {
+      this.meshWorker = new Worker(new URL('./chunkMesh.worker.ts', import.meta.url), {
+        type: 'module',
+      })
+      this.meshWorker.onmessage = (ev: MessageEvent) => {
+        this.onMeshWorkerResult(ev.data)
+      }
+      this.meshWorker.onerror = () => {
+        this.meshWorkerFailed = true
+        this.meshWorker?.terminate()
+        this.meshWorker = null
+        // 积压任务改走主线程
+        for (const [jobId, job] of this.pendingMeshJobs) {
+          this.pendingMeshJobs.delete(jobId)
+          this.inflightMesh = Math.max(0, this.inflightMesh - 1)
+          this.mountChunkSync(job.cx, job.cz, job.lod, job.gen)
+        }
+      }
+    } catch {
+      this.meshWorkerFailed = true
+      this.meshWorker = null
+    }
+  }
+
+  private bumpChunkGen(key: string) {
+    const g = (this.chunkGen.get(key) || 0) + 1
+    this.chunkGen.set(key, g)
+    return g
+  }
+
   private mountChunk(cx: number, cz: number, lod: ChunkLod) {
     const key = chunkKey(cx, cz)
+    const gen = this.bumpChunkGen(key)
+    // 主线程先烘焙体素（碰撞/交互）；几何放到 Worker
+    this.world.warmChunkVoxelsForMesh(cx, cz)
+    // 立刻铺地表代理，避免转视角时整块镂空
+    const proxy = buildChunkGroundProxy(this.world, cx, cz)
+    this.applyMountedMeshes(key, proxy, gen)
+
+    this.ensureMeshWorker()
+    if (!this.meshWorker) {
+      this.mountChunkSync(cx, cz, lod, gen)
+      return
+    }
+    const jobId = ++this.meshJobSeq
+    this.pendingMeshJobs.set(jobId, { key, cx, cz, lod, gen })
+    this.inflightMesh++
+    this.meshWorker.postMessage({
+      jobId,
+      seed: this.world.seed,
+      cx,
+      cz,
+      lod,
+      overrides: this.world.collectOverridesAround(cx, cz, 1),
+    })
+  }
+
+  private mountChunkSync(cx: number, cz: number, lod: ChunkLod, gen: number) {
+    const key = chunkKey(cx, cz)
+    if (this.chunkGen.get(key) !== gen) return
     const meshes = buildChunkMeshes(this.world, cx, cz, lod)
+    this.applyMountedMeshes(key, meshes, gen)
+  }
+
+  private onMeshWorkerResult(data: {
+    jobId: number
+    cx: number
+    cz: number
+    lod: ChunkLod
+    buffers: Parameters<typeof meshesFromChunkBuffers>[0]
+  }) {
+    this.inflightMesh = Math.max(0, this.inflightMesh - 1)
+    const pending = this.pendingMeshJobs.get(data.jobId)
+    this.pendingMeshJobs.delete(data.jobId)
+    if (!pending) return
+    if (this.chunkGen.get(pending.key) !== pending.gen) return
+    const meshes = meshesFromChunkBuffers(data.buffers)
+    // 用完整网格替换地表代理
+    this.applyMountedMeshes(pending.key, meshes, pending.gen)
+    if (this.mountQueue.length) this.scheduleIdleMount()
+  }
+
+  private applyMountedMeshes(key: string, meshes: ChunkMeshes, gen: number) {
+    if (this.chunkGen.get(key) !== gen) {
+      disposeChunkMeshes(meshes)
+      return
+    }
+    const old = this.chunks.get(key)
+    if (old) {
+      if (old.solid) this.chunkGroup.remove(old.solid)
+      if (old.water) this.chunkGroup.remove(old.water)
+      if (old.grass) this.chunkGroup.remove(old.grass)
+      disposeChunkMeshes(old)
+    }
     if (meshes.solid) this.chunkGroup.add(meshes.solid)
     if (meshes.water) this.chunkGroup.add(meshes.water)
     if (meshes.grass) this.chunkGroup.add(meshes.grass)
@@ -3287,6 +913,7 @@ export class GameEngine {
   }
 
   private unmountChunk(key: string, meshes: ChunkMeshes) {
+    this.bumpChunkGen(key)
     if (meshes.solid) this.chunkGroup.remove(meshes.solid)
     if (meshes.water) this.chunkGroup.remove(meshes.water)
     if (meshes.grass) this.chunkGroup.remove(meshes.grass)
@@ -3304,10 +931,16 @@ export class GameEngine {
   /** 重建单个已加载区块网格 */
   private rebuildOneChunk(cx: number, cz: number) {
     const key = chunkKey(cx, cz)
-    if (!this.chunks.has(key)) return
-    const old = this.chunks.get(key)!
-    this.unmountChunk(key, old)
-    this.mountChunk(cx, cz, this.focusChunkLod(cx, cz))
+    const lod = this.focusChunkLod(cx, cz)
+    const old = this.chunks.get(key)
+    if (old) {
+      if (old.solid) this.chunkGroup.remove(old.solid)
+      if (old.water) this.chunkGroup.remove(old.water)
+      if (old.grass) this.chunkGroup.remove(old.grass)
+      disposeChunkMeshes(old)
+      this.chunks.delete(key)
+    }
+    this.mountChunk(cx, cz, lod)
   }
 
   private enqueueRebuild(cx: number, cz: number) {
@@ -3373,15 +1006,22 @@ export class GameEngine {
   }
 
   setMoveInput(forward: number, strafe: number) {
+    if (this.combatLocked) {
+      this.moveForward = 0
+      this.moveStrafe = 0
+      return
+    }
     this.moveForward = Math.max(-1, Math.min(1, forward))
     this.moveStrafe = Math.max(-1, Math.min(1, strafe))
   }
 
   queueJump() {
+    if (this.combatLocked) return
     this.jumpQueued = true
   }
 
   applyLook(deltaX: number, deltaY: number, sensitivity = 0.0055) {
+    if (this.combatLocked) return
     // 往哪滑就往哪看：水平跟手；垂直取反（上滑抬头、下滑低头）
     const dx = Math.max(-64, Math.min(64, deltaX))
     const dy = Math.max(-64, Math.min(64, deltaY))
@@ -3397,18 +1037,33 @@ export class GameEngine {
   }
 
   private consumeLookBuffer(dt: number) {
-    if (this.lookBufX === 0 && this.lookBufY === 0) return
-    // 更高跟手：几乎当场转完，只留一点平滑去抖
-    const k = 1 - Math.exp(-36 * dt)
-    const useX = this.lookBufX * k
-    const useY = this.lookBufY * k
-    this.lookBufX -= useX
-    this.lookBufY -= useY
-    if (Math.abs(this.lookBufX) < 1e-5) this.lookBufX = 0
-    if (Math.abs(this.lookBufY) < 1e-5) this.lookBufY = 0
+    const hasLook = this.lookBufX !== 0 || this.lookBufY !== 0
+    const hasRecoil = Math.abs(this.recoilPitch) > 1e-5 || Math.abs(this.recoilYaw) > 1e-5
+    if (!hasLook && !hasRecoil) return
 
-    this.yaw -= useX
-    this.pitch -= useY
+    if (hasLook) {
+      const k = 1 - Math.exp(-36 * dt)
+      const useX = this.lookBufX * k
+      const useY = this.lookBufY * k
+      this.lookBufX -= useX
+      this.lookBufY -= useY
+      if (Math.abs(this.lookBufX) < 1e-5) this.lookBufX = 0
+      if (Math.abs(this.lookBufY) < 1e-5) this.lookBufY = 0
+      this.yaw -= useX
+      this.pitch -= useY
+    }
+
+    if (hasRecoil) {
+      // 后坐瞬时抬枪，再快速回落
+      const kick = 1 - Math.exp(-18 * dt)
+      this.pitch += this.recoilPitch * kick
+      this.yaw += this.recoilYaw * kick
+      this.recoilPitch *= Math.exp(-10 * dt)
+      this.recoilYaw *= Math.exp(-10 * dt)
+      if (Math.abs(this.recoilPitch) < 1e-5) this.recoilPitch = 0
+      if (Math.abs(this.recoilYaw) < 1e-5) this.recoilYaw = 0
+    }
+
     this.pitch = Math.max(-1.05, Math.min(0.95, this.pitch))
     this.applyCameraRotation()
   }
@@ -3481,11 +1136,41 @@ export class GameEngine {
 
   getPose() {
     return {
+      x: this.camera.position.x,
+      y: this.camera.position.y,
+      z: this.camera.position.z,
       yaw: this.yaw,
       pitch: this.pitch,
       crouching: this.crouching,
       action: this.actionKind,
     }
+  }
+
+  playCombatSwing(weaponId: string) {
+    this.audio?.playWeaponAttack(weaponId)
+    const ranged = weaponId === 'pistol' || weaponId === 'rifle' || weaponId === 'sniper'
+    if (ranged) {
+      this.body.playSwing('dig')
+      // 轻微后坐：狙击更明显，步枪短促，手枪最轻
+      const kick =
+        weaponId === 'sniper' ? 0.055 : weaponId === 'rifle' ? 0.028 : 0.018
+      this.recoilPitch += kick * (0.85 + Math.random() * 0.3)
+      this.recoilYaw += (Math.random() - 0.5) * kick * 0.55
+    } else {
+      this.body.playSwing('axe')
+    }
+  }
+
+  /** 枪械开火时的轻微方向散布（弧度） */
+  combatAimJitter(weaponId: string): { jx: number; jz: number } {
+    if (weaponId !== 'pistol' && weaponId !== 'rifle' && weaponId !== 'sniper') {
+      return { jx: 0, jz: 0 }
+    }
+    const spread =
+      weaponId === 'sniper' ? 0.008 : weaponId === 'rifle' ? 0.022 : 0.028
+    const a = (Math.random() - 0.5) * spread
+    const b = (Math.random() - 0.5) * spread
+    return { jx: a, jz: b }
   }
 
   refreshTargetLabel() {
@@ -3516,6 +1201,7 @@ export class GameEngine {
       const id = this.world.get(this.selected.hit.x, this.selected.hit.y, this.selected.hit.z)
       if (id === 'wood' || id === 'leaves') this.targetName = '树木'
       else if (id === 'stone') this.targetName = '石头'
+      else if (id === 'water') this.targetName = '小溪'
       else this.targetName = BLOCK_LABEL[id] || ''
     } else {
       this.targetName = ''
@@ -3545,7 +1231,7 @@ export class GameEngine {
     let id = this.world.get(x, y, z)
     let kind = this.kindForBlock(id)
     if (!kind) {
-      this.lastActionHint = '无法操作此方块'
+      this.lastActionHint = id === 'water' ? '小溪无法挖掘' : '无法操作此方块'
       this.onActionUi?.()
       return
     }
@@ -3886,15 +1572,42 @@ export class GameEngine {
 
     // dig / clear
     const id = this.world.get(a.x, a.y, a.z)
+    if (id === 'water') {
+      this.lastActionHint = '小溪无法挖掘'
+      this.onActionUi?.()
+      return
+    }
+
+    // 河道下方：挖不到空洞，顶多刨一层湿沙（河床仍在）
+    const inCreek = this.world.isCreek(a.x, a.z)
+    const sy = this.world.surfaceHeight(a.x, a.z)
+    if (inCreek && a.y < sy) {
+      if (this.inventory) {
+        addMaterial(this.inventory, 'sand', 1)
+        this.onInventoryChange?.()
+        this.onHarvestLoot?.('dig')
+        this.lastActionHint = '+1 沙子'
+      }
+      this.world.set(a.x, a.y, a.z, a.y >= sy - 1 ? 'sand' : 'dirt')
+      this.rebuildChunkAt(a.x, a.z)
+      this.emitBlocks([
+        { x: a.x, y: a.y, z: a.z, blockId: a.y >= sy - 1 ? 'sand' : 'dirt' },
+      ])
+      this.updateBlockSelection()
+      return
+    }
+
     const harvest = BLOCK_HARVEST[id]
     if (harvest?.mat && this.inventory) {
       addMaterial(this.inventory, harvest.mat, 1)
       this.onInventoryChange?.()
+      this.onHarvestLoot?.(kind === 'clear' ? 'clear' : 'dig')
       this.lastActionHint = `+1`
     }
-    this.world.set(a.x, a.y, a.z, harvest?.remain ?? 'air')
+    const remain = harvest?.remain ?? 'air'
+    this.world.set(a.x, a.y, a.z, remain)
     this.rebuildChunkAt(a.x, a.z)
-    this.emitBlocks([{ x: a.x, y: a.y, z: a.z, blockId: harvest?.remain ?? 'air' }])
+    this.emitBlocks([{ x: a.x, y: a.y, z: a.z, blockId: remain }])
     this.updateBlockSelection()
   }
 
@@ -3959,6 +1672,7 @@ export class GameEngine {
       addMaterial(this.inventory, 'wood', woodCount)
       this.onInventoryChange?.()
     }
+    this.onHarvestLoot?.('chop')
     this.debris.burst(burstX + 0.5, burstY + 0.45, burstZ + 0.5, 0x8b5a2b, 14)
     this.hideSelectionTint()
     this.lastActionHint = `+${woodCount} 木材`
@@ -3993,6 +1707,7 @@ export class GameEngine {
       addMaterial(this.inventory, 'stone', gain)
       this.onInventoryChange?.()
     }
+    this.onHarvestLoot?.('mine')
     this.hideSelectionTint()
     this.lastActionHint = `+${gain} 石材`
     this.updateBlockSelection()
@@ -4178,7 +1893,8 @@ export class GameEngine {
 
     for (let i = 0; i < 96; i++) {
       const id = this.world.get(x, y, z)
-      if (id !== 'air' && id !== 'water') {
+      // 河水可瞄准（不可挖），避免射线穿透挖空河床导致镂空
+      if (id !== 'air') {
         if (t > maxDist + 1e-4) return null
         // 造型小于体素：射线未打中外形则穿透继续
         if (this.rayHitsBlockShape(o, d, x, y, z, id, maxDist)) {
@@ -4186,7 +1902,7 @@ export class GameEngine {
           const placeId = this.world.get(place.x, place.y, place.z)
           return {
             hit: { x, y, z },
-            place: placeId === 'air' ? place : null,
+            place: placeId === 'air' || placeId === 'water' ? place : null,
             face: { ...face },
           }
         }
@@ -4729,11 +2445,13 @@ export class GameEngine {
 
   /** 与视觉石头大致匹配的水平半径 / 高度 */
   private naturalRockRadius(size: number) {
-    return size === 1 ? 0.36 : size === 2 ? 0.55 : 0.78
+    // 大石略放大，避免贴着模型穿模
+    return size === 1 ? 0.32 : size === 2 ? 0.62 : 0.92
   }
 
   private naturalRockHeight(size: number) {
-    return size === 1 ? 0.48 : size === 2 ? 0.82 : 1.12
+    // size1 矮：可走过去；size≥2 约一人高，需跳跃
+    return size === 1 ? 0.4 : size === 2 ? 1.28 : 1.58
   }
 
   private collidesNaturalRocks(px: number, y0: number, y1: number, pz: number) {
@@ -4746,10 +2464,12 @@ export class GameEngine {
         const feat = this.world.featureBaseY(sx, sz)
         const size = this.world.naturalRockAnchorSize(sx, feat, sz)
         if (size == null) continue
+        // 小石不挡路，可直接走过去
+        if (size <= 1) continue
         const rockBot = feat
         const rockTop = feat + this.naturalRockHeight(size)
-        // 站在石顶（含小余量）：不挡，避免贴地微陷触发碰撞抖动
-        if (y0 >= rockTop - 0.12) continue
+        // 已站上石顶：不挡；余量收紧，避免「抬半格就穿石」
+        if (y0 >= rockTop - 0.04) continue
         if (y1 <= rockBot + 0.02) continue
         const cx = sx + 0.5
         const cz = sz + 0.5
@@ -4824,7 +2544,7 @@ export class GameEngine {
     return best
   }
 
-  /** 脚附近可站立的天然石顶面 */
+  /** 脚附近可站立的天然石顶面（跳上大石后可站稳） */
   private naturalRockSupportTop(px: number, feetY: number, pz: number): number | null {
     const ix = Math.floor(px)
     const iz = Math.floor(pz)
@@ -4837,10 +2557,10 @@ export class GameEngine {
         const size = this.world.naturalRockAnchorSize(sx, feat, sz)
         if (size == null) continue
         const top = feat + this.naturalRockHeight(size)
-        if (top > feetY + 0.25 || top < feetY - 1.6) continue
+        if (top > feetY + 0.35 || top < feetY - 1.8) continue
         const cx = sx + 0.5
         const cz = sz + 0.5
-        const radius = this.naturalRockRadius(size) * 0.92
+        const radius = this.naturalRockRadius(size) * (size <= 1 ? 0.85 : 0.9)
         const nx = Math.max(px - PLAYER_HALF_W, Math.min(cx, px + PLAYER_HALF_W))
         const nz = Math.max(pz - PLAYER_HALF_W, Math.min(cz, pz + PLAYER_HALF_W))
         const ddx = nx - cx
@@ -4923,7 +2643,7 @@ export class GameEngine {
 
   /**
    * 水平移动（分轴）：体型碰撞防穿墙。
-   * 缓坡允许自动迈上一格；更高的坎仍需跳跃。
+   * 台阶 / 一格高坎不自动上台，需跳跃过去。
    */
   private tryMoveAxis(axis: 'x' | 'z', next: number) {
     const ox = this.camera.position.x
@@ -4935,16 +2655,6 @@ export class GameEngine {
     if (!this.bodyCollides(nx, oy, nz)) {
       if (axis === 'x') this.camera.position.x = next
       else this.camera.position.z = next
-      return
-    }
-    // 缓坡：允许自动迈上一格台阶
-    if (this.onGround) {
-      const stepped = oy + 1.05
-      if (!this.bodyCollides(nx, stepped, nz)) {
-        this.camera.position.y = stepped
-        if (axis === 'x') this.camera.position.x = next
-        else this.camera.position.z = next
-      }
     }
   }
 
@@ -5013,6 +2723,35 @@ export class GameEngine {
     }
   }
 
+  /**
+   * 昼夜：白天 50 分钟（含黎明/黄昏各 1 分钟）+ 黑夜 10 分钟。
+   * 黑夜保留环境光，避免伸手不见五指。
+   */
+  private applyDayNight() {
+    const { dayness } = sampleDayNight()
+    const d = dayness
+
+    this.bgColor.copy(this.nightBg).lerp(this.dayBg, d)
+    this.scene.background = this.bgColor
+    this.renderer.setClearColor(this.bgColor, 1)
+
+    if (this.scene.fog instanceof THREE.Fog) {
+      this.scene.fog.color.copy(this.nightFog).lerp(this.dayFog, d)
+    }
+
+    this.hemiLight.color.copy(this.nightHemiSky).lerp(this.dayHemiSky, d)
+    this.hemiLight.groundColor.copy(this.nightHemiGround).lerp(this.dayHemiGround, d)
+    this.hemiLight.intensity = 0.42 + 0.48 * d
+
+    this.sunLight.color.copy(this.nightSunColor).lerp(this.daySunColor, d)
+    this.sunLight.intensity = 0.22 + 0.98 * d
+
+    this.ambientLight.color.copy(this.nightAmbient).lerp(this.dayAmbient, d)
+    this.ambientLight.intensity = 0.24 + 0.08 * d
+
+    this.sky.setDayness(d)
+  }
+
   private update(dt: number) {
     this.consumeLookBuffer(dt)
     this.tickCrouch(dt)
@@ -5043,14 +2782,26 @@ export class GameEngine {
       this.moveHintX = move.x / moveLen
       this.moveHintZ = move.z / moveLen
       if (this.mountQueue.length) this.mountSortDirty = true
-      const speed = 1.4 + moveStrength * 2.6
+      const speedMul = this.combatSlow ? 0.45 : 1
+      const speed = (1.4 + moveStrength * 2.6) * speedMul
       move.multiplyScalar((speed * dt) / moveLen)
       this.tryMoveAxis('x', this.camera.position.x + move.x)
       this.tryMoveAxis('z', this.camera.position.z + move.z)
     } else {
-      // 站立时按朝向预取，转身再走也不会空窗
+      // 站立转视角：按视线预取，快速甩镜头时优先铺朝向那边的地
       this.moveHintX = -Math.sin(this.yaw)
       this.moveHintZ = -Math.cos(this.yaw)
+    }
+
+    // 视线转过一定角度：重排挂载队列并多冲一波，减少镂空
+    const lookDot = this.moveHintX * this.lookHintX + this.moveHintZ * this.lookHintZ
+    if (lookDot < 0.93) {
+      this.lookHintX = this.moveHintX
+      this.lookHintZ = this.moveHintZ
+      this.mountSortDirty = true
+      if (!this.deploy?.active && this.mountQueue.length) {
+        this.flushMountQueue(2)
+      }
     }
 
     const wantJump = this.jumpQueued || this.keys.has('Space')
@@ -5200,6 +2951,7 @@ export class GameEngine {
 
     this.sky.update(dt, this.camera.position)
     this.sunLight.position.copy(this.sky.getSunPosition())
+    this.applyDayNight()
 
     this.streamTimer += dt
     if (this.streamTimer > 0.15) {
@@ -5253,37 +3005,50 @@ export class GameEngine {
   }
 
   /**
-   * 进服准备舱：落点上空亮色平台 + 空气墙；倒计时按墙上时钟读秒，到点即投下。
-   * onProgress(remainSec, timeProgress0to1) — 进度条跟真实倒计时走（不跟铺图卡顿）。
+   * 进服准备舱：落点上空平台 + 空气墙；倒计时到点投下。
+   * 组队时可指定 cabinX/Z 与 partySlot，多人同舱错位站立。
    */
   beginDeploy(
     dest: { x: number; y: number; z: number; yaw?: number; pitch?: number },
     opts?: {
       durationSec?: number
+      cabinX?: number
+      cabinZ?: number
+      partySlot?: number
       onProgress?: (remain: number, timeProgress: number) => void
       onComplete?: () => void
     }
   ) {
     this.clearDeployPad()
-    const dx = Number.isFinite(dest.x) ? dest.x : 2
-    const dz = Number.isFinite(dest.z) ? dest.z : 10
-    const groundY = this.getGroundY(dx, dz)
-    const dy = Math.max(Number(dest.y) || 0, groundY + this.eyeHeight)
+    const dropX = Number.isFinite(dest.x) ? dest.x : 2
+    const dropZ = Number.isFinite(dest.z) ? dest.z : 10
+    const cabinX = Number.isFinite(opts?.cabinX) ? Number(opts!.cabinX) : dropX
+    const cabinZ = Number.isFinite(opts?.cabinZ) ? Number(opts!.cabinZ) : dropZ
+    const groundY = this.getGroundY(cabinX, cabinZ)
+    const dropGroundY = this.getGroundY(dropX, dropZ)
+    const dy = Math.max(Number(dest.y) || 0, dropGroundY + this.eyeHeight)
     const padY = groundY + DEPLOY_PAD_HEIGHT
-    const group = this.buildDeployPad(dx, padY, dz)
+    const group = this.buildDeployPad(cabinX, padY, cabinZ)
     this.scene.add(group)
 
+    const slot = Math.max(0, Math.floor(Number(opts?.partySlot) || 0))
+    const ang = (slot * 1.85) % (Math.PI * 2)
+    const rad = slot === 0 ? 0.4 : 1.4 + (slot % 3) * 0.45
+    const startX = cabinX + Math.cos(ang) * rad
+    const startZ = cabinZ + Math.sin(ang) * rad
+
     const duration = opts?.durationSec ?? DEPLOY_DURATION_SEC
+    const warmTasks = buildDeployWarmTasks(this.audio)
     this.deploy = {
       active: true,
       group,
       padY,
-      cx: dx,
-      cz: dz,
+      cx: cabinX,
+      cz: cabinZ,
       dest: {
-        x: dx,
+        x: dropX,
         y: dy,
-        z: dz,
+        z: dropZ,
         yaw: dest.yaw ?? 0,
         pitch: dest.pitch ?? -0.25,
       },
@@ -5291,20 +3056,24 @@ export class GameEngine {
       duration,
       endsAt: performance.now() + duration * 1000,
       lastUiAt: 0,
+      lastStreamAt: 0,
+      lastTickSec: -1,
+      warmTasks,
+      warmDone: 0,
+      warmLabel: warmTasks[0]?.label || '就绪',
       onProgress: opts?.onProgress,
       onComplete: opts?.onComplete,
     }
 
-    // 人在舱里，图按落点刷
-    this.streamFocusX = dx
-    this.streamFocusZ = dz
-    this.camera.position.set(dx, padY + this.eyeHeight, dz)
+    // 人在舱里：图按舱心刷；落点另圈在 streamChunks 里并铺
+    this.streamFocusX = cabinX
+    this.streamFocusZ = cabinZ
+    this.camera.position.set(startX, padY + this.eyeHeight, startZ)
     this.yaw = this.deploy.dest.yaw
     this.pitch = Math.max(-1.05, Math.min(0.95, this.deploy.dest.pitch))
     this.velocityY = 0
     this.onGround = true
     this.applyCameraRotation()
-    // 准备舱看得更远，方便看见下方地图展开
     if (this.scene.fog instanceof THREE.Fog) {
       this.scene.fog.near = 20
       this.scene.fog.far = CHUNK_SIZE * DEPLOY_STREAM_RADIUS + 48
@@ -5314,34 +3083,107 @@ export class GameEngine {
     this.deploy.onProgress?.(this.deploy.remain, 0)
   }
 
+  /** 准备舱资源预热进度 0..1 */
+  getDeployWarmProgress() {
+    const d = this.deploy
+    if (!d?.warmTasks.length) return 1
+    return Math.min(1, d.warmDone / d.warmTasks.length)
+  }
+
+  getDeployWarmLabel() {
+    return this.deploy?.warmLabel || ''
+  }
+
   private buildDeployPad(cx: number, padY: number, cz: number) {
     const g = new THREE.Group()
     g.name = 'deploy-pad'
     const half = DEPLOY_PAD_HALF
     const size = half * 2
 
-    // 亮色平整地面
-    const deck = new THREE.Mesh(
-      new THREE.BoxGeometry(size, 0.1, size),
-      new THREE.MeshLambertMaterial({ color: 0xf4f7fb })
-    )
-    deck.position.set(cx, padY - 0.05, cz)
+    // 舱底板：Basic 材质，不受昼夜光照影响，避免夜里发黑
+    const deckMat = new THREE.MeshBasicMaterial({
+      color: 0x7a92a8,
+      toneMapped: false,
+    })
+    const deck = new THREE.Mesh(new THREE.BoxGeometry(size, 0.14, size), deckMat)
+    deck.position.set(cx, padY - 0.07, cz)
     g.add(deck)
+
+    // 中心踏步区：略亮银灰
+    const inset = size * 0.7
+    const insetMat = new THREE.MeshBasicMaterial({
+      color: 0xa8bcc8,
+      toneMapped: false,
+    })
+    const insetMesh = new THREE.Mesh(new THREE.BoxGeometry(inset, 0.05, inset), insetMat)
+    insetMesh.position.set(cx, padY + 0.01, cz)
+    g.add(insetMesh)
+
+    // 舱面浅色网格线（可读性）
+    const gridMat = new THREE.MeshBasicMaterial({
+      color: 0xc5d8e6,
+      transparent: true,
+      opacity: 0.35,
+      depthWrite: false,
+      toneMapped: false,
+    })
+    const gridStep = 1.1
+    for (let i = -4; i <= 4; i++) {
+      const o = i * gridStep
+      if (Math.abs(o) > half - 0.2) continue
+      const gh = new THREE.Mesh(new THREE.BoxGeometry(size * 0.92, 0.012, 0.035), gridMat)
+      gh.position.set(cx, padY + 0.028, cz + o)
+      g.add(gh)
+      const gv = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.012, size * 0.92), gridMat)
+      gv.position.set(cx + o, padY + 0.028, cz)
+      g.add(gv)
+    }
+
+    // 舱面导光环
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0x9ae0ff,
+      transparent: true,
+      opacity: 0.75,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    })
+    const ring = new THREE.Mesh(new THREE.RingGeometry(half * 0.78, half * 0.9, 48), ringMat)
+    ring.rotation.x = -Math.PI / 2
+    ring.position.set(cx, padY + 0.035, cz)
+    g.add(ring)
+
+    // 十字定位线
+    const lineMat = new THREE.MeshBasicMaterial({
+      color: 0xd2f2ff,
+      transparent: true,
+      opacity: 0.55,
+      depthWrite: false,
+      toneMapped: false,
+    })
+    const crossH = new THREE.Mesh(new THREE.BoxGeometry(inset * 0.92, 0.02, 0.06), lineMat)
+    crossH.position.set(cx, padY + 0.04, cz)
+    g.add(crossH)
+    const crossV = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.02, inset * 0.92), lineMat)
+    crossV.position.set(cx, padY + 0.04, cz)
+    g.add(crossV)
 
     // 四周可见空气墙（半透明亮边）
     const wallMat = new THREE.MeshBasicMaterial({
-      color: 0xb8e8ff,
+      color: 0x9ad8f5,
       transparent: true,
-      opacity: 0.32,
+      opacity: 0.28,
       side: THREE.DoubleSide,
       depthWrite: false,
+      toneMapped: false,
     })
     const edge = new THREE.MeshBasicMaterial({
-      color: 0xffffff,
+      color: 0xd8f4ff,
       transparent: true,
-      opacity: 0.55,
+      opacity: 0.58,
       side: THREE.DoubleSide,
       depthWrite: false,
+      toneMapped: false,
     })
     const thick = 0.07
     const walls: { w: number; d: number; x: number; z: number }[] = [
@@ -5357,7 +3199,6 @@ export class GameEngine {
       )
       panel.position.set(w.x, padY + DEPLOY_WALL_H * 0.5, w.z)
       g.add(panel)
-      // 顶边亮线，更容易读出边界
       const lip = new THREE.Mesh(
         new THREE.BoxGeometry(w.w, 0.06, w.d + 0.02),
         edge
@@ -5397,11 +3238,49 @@ export class GameEngine {
     this.camera.position.x = Math.max(d.cx - half, Math.min(d.cx + half, this.camera.position.x))
     this.camera.position.z = Math.max(d.cz - half, Math.min(d.cz + half, this.camera.position.z))
 
+    // 分帧预热投送后模型 / 音效 / 表数据
+    for (let i = 0; i < GameEngine.DEPLOY_WARM_PER_TICK; i++) {
+      if (d.warmDone >= d.warmTasks.length) break
+      const task = d.warmTasks[d.warmDone]
+      try {
+        task.run()
+      } catch {
+        // 单个预热失败不阻断投送
+      }
+      d.warmDone += 1
+      d.warmLabel =
+        d.warmDone >= d.warmTasks.length
+          ? '资源就绪'
+          : d.warmTasks[d.warmDone]?.label || '加载中'
+    }
+
     // 墙上时钟读秒：铺图卡帧时也不会变慢（不再用被 clamp 的 dt 累加）
     d.remain = Math.max(0, (d.endsAt - performance.now()) / 1000)
     const timeProgress = d.duration > 0 ? 1 - d.remain / d.duration : 1
-    // UI 约 10Hz，避免每帧写 Vue reactive 加重舱内卡顿
+
+    // 最后 5 秒叮叮叮倒计时提示
+    if (d.remain > 0 && d.remain <= 5.05) {
+      const sec = Math.ceil(d.remain)
+      if (sec >= 1 && sec <= 5 && sec !== d.lastTickSec) {
+        d.lastTickSec = sec
+        this.audio?.play('deploy_tick', {
+          volume: 0.9 + (5 - sec) * 0.05,
+          pitch: 1 + (5 - sec) * 0.1,
+        })
+      }
+    } else if (d.remain <= 0 && d.lastTickSec !== 0) {
+      d.lastTickSec = 0
+      this.audio?.play('deploy_go', { volume: 1 })
+    }
+
+    // 定期强制复扫：提升 LOD、补落点圈
     const nowMs = performance.now()
+    if (nowMs - d.lastStreamAt > 900) {
+      d.lastStreamAt = nowMs
+      this.streamChunks(true)
+    }
+
+    // UI 约 10Hz，避免每帧写 Vue reactive 加重舱内卡顿
     if (nowMs - d.lastUiAt > 100 || d.remain <= 0) {
       d.lastUiAt = nowMs
       d.onProgress?.(d.remain, timeProgress)
@@ -5593,9 +3472,17 @@ export class GameEngine {
       disposeChunkMeshes(meshes)
     }
     this.chunks.clear()
+    this.world.clearVoxelCache()
     this.rebuildQueue.clear()
     this.mountQueue.length = 0
     this.mountQueued.clear()
+    this.pendingMeshJobs.clear()
+    this.inflightMesh = 0
+    this.chunkGen.clear()
+    if (this.meshWorker) {
+      this.meshWorker.terminate()
+      this.meshWorker = null
+    }
     this.body.dispose()
     this.debris.dispose()
     this.creekFlow.dispose()

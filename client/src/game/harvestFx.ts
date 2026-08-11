@@ -35,7 +35,7 @@ export function actionLabel(kind: HarvestKind | null): string {
   }
 }
 
-/** 木屑 / 石屑粒子 */
+/** 木屑 / 石屑粒子（共享几何 + 材质缓存，减少 GC） */
 export class DebrisParticles {
   readonly group = new THREE.Group()
   private items: {
@@ -45,9 +45,27 @@ export class DebrisParticles {
     vz: number
     life: number
   }[] = []
+  private pool: {
+    mesh: THREE.Mesh
+    vx: number
+    vy: number
+    vz: number
+    life: number
+  }[] = []
+  private readonly sharedGeo = new THREE.BoxGeometry(1, 0.35, 0.55)
+  private readonly matCache = new Map<number, THREE.MeshLambertMaterial>()
 
   constructor(private scene: THREE.Scene) {
     this.scene.add(this.group)
+  }
+
+  private matFor(color: number) {
+    let m = this.matCache.get(color)
+    if (!m) {
+      m = new THREE.MeshLambertMaterial({ color })
+      this.matCache.set(color, m)
+    }
+    return m
   }
 
   burst(
@@ -58,14 +76,19 @@ export class DebrisParticles {
     count: number,
     outward?: THREE.Vector3
   ) {
-    for (let i = 0; i < count; i++) {
-      // 扁片碎屑，避免大方块飘在身边像砖头
+    const n = Math.min(count, 10)
+    for (let i = 0; i < n; i++) {
       const size = 0.03 + Math.random() * 0.05
-      const mesh = new THREE.Mesh(
-        new THREE.BoxGeometry(size, size * 0.35, size * 0.55),
-        new THREE.MeshLambertMaterial({ color })
-      )
-      mesh.position.set(
+      const p = this.pool.pop() || {
+        mesh: new THREE.Mesh(this.sharedGeo, this.matFor(color)),
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        life: 0,
+      }
+      p.mesh.material = this.matFor(color)
+      p.mesh.scale.set(size, size, size)
+      p.mesh.position.set(
         x + (Math.random() - 0.5) * 0.22,
         y + Math.random() * 0.18,
         z + (Math.random() - 0.5) * 0.22
@@ -74,14 +97,12 @@ export class DebrisParticles {
         ? outward.clone().normalize()
         : new THREE.Vector3(Math.random() - 0.5, 0.55, Math.random() - 0.5).normalize()
       const sp = 0.9 + Math.random() * 1.6
-      this.group.add(mesh)
-      this.items.push({
-        mesh,
-        vx: dir.x * sp + (Math.random() - 0.5) * 0.6,
-        vy: 1.1 + Math.random() * 1.8,
-        vz: dir.z * sp + (Math.random() - 0.5) * 0.6,
-        life: 0.45 + Math.random() * 0.4,
-      })
+      p.vx = dir.x * sp + (Math.random() - 0.5) * 0.6
+      p.vy = 1.1 + Math.random() * 1.8
+      p.vz = dir.z * sp + (Math.random() - 0.5) * 0.6
+      p.life = 0.45 + Math.random() * 0.4
+      this.group.add(p.mesh)
+      this.items.push(p)
     }
   }
 
@@ -99,20 +120,19 @@ export class DebrisParticles {
         alive.push(p)
       } else {
         this.group.remove(p.mesh)
-        p.mesh.geometry.dispose()
-        ;(p.mesh.material as THREE.Material).dispose()
+        this.pool.push(p)
       }
     }
     this.items = alive
   }
 
   dispose() {
-    for (const p of this.items) {
-      this.group.remove(p.mesh)
-      p.mesh.geometry.dispose()
-      ;(p.mesh.material as THREE.Material).dispose()
-    }
+    for (const p of this.items) this.group.remove(p.mesh)
     this.items = []
+    this.pool = []
+    this.sharedGeo.dispose()
+    for (const m of this.matCache.values()) m.dispose()
+    this.matCache.clear()
     this.scene.remove(this.group)
   }
 }

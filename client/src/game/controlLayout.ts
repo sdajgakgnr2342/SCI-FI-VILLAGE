@@ -1,27 +1,28 @@
-/** 移动端键位布局（仿吃鸡自定义） */
+/** ??????????????? */
 
 export type ControlId =
   | 'stick'
   | 'jump'
   | 'ware'
   | 'break'
+  | 'attack'
   | 'crouch'
   | 'targetHint'
   | 'actionRing'
 
 export interface ControlItemLayout {
-  /** 左缘百分比 0–100 */
+  /** ????? 0?100 */
   x: number
-  /** 底缘百分比 0–100 */
+  /** ????? 0?100 */
   y: number
-  /** 尺寸倍率 */
+  /** ???? */
   size: number
-  /** 透明度 0.2–1 */
+  /** ??? 0.2?1 */
   opacity: number
 }
 
 export interface ControlLayout {
-  /** v3：www 账号实测簇 + 无模式键（选材料即建造） */
+  /** v3?www ????? + ???????????? */
   version: 3
   items: Record<ControlId, ControlItemLayout>
 }
@@ -31,29 +32,31 @@ export const CONTROL_IDS: ControlId[] = [
   'jump',
   'ware',
   'break',
+  'attack',
   'crouch',
   'targetHint',
   'actionRing',
 ]
 
 export const CONTROL_LABEL: Record<ControlId, string> = {
-  stick: '移动轮盘',
-  jump: '跳跃',
-  ware: '仓库',
-  break: '操作/放置',
-  crouch: '下蹲',
-  targetHint: '物体提示',
-  actionRing: '操作圆环',
+  stick: '????',
+  jump: '??',
+  ware: '??',
+  break: '??/??',
+  attack: '??',
+  crouch: '??',
+  targetHint: '????',
+  actionRing: '????',
 }
 
 /**
- * 官方默认：取自 www 账号云端键位的坐标与尺寸（透明度另定）
+ * ??????? www ???????????????????
  *
  * ```
- *   [跳]
- *         [操作大]
- *   [蹲]          · 仓在偏上
- * 轮盘左下
+ *   [?]
+ *         [???]
+ *   [?]  [??]     � ????
+ * ????
  * ```
  */
 export function defaultControlLayout(): ControlLayout {
@@ -64,6 +67,7 @@ export function defaultControlLayout(): ControlLayout {
       jump: { x: 78, y: 33, size: 1, opacity: 0.9 },
       crouch: { x: 76, y: 10, size: 1, opacity: 0.9 },
       break: { x: 85, y: 9, size: 1.7, opacity: 0.92 },
+      attack: { x: 72, y: 22, size: 1.15, opacity: 0.92 },
       ware: { x: 83, y: 86, size: 0.65, opacity: 0.9 },
       actionRing: { x: 42, y: 40, size: 1, opacity: 0.95 },
       targetHint: { x: 40, y: 24, size: 1, opacity: 0.92 },
@@ -90,7 +94,7 @@ export function normalizeControlLayout(raw: unknown): ControlLayout {
   if (!obj.items || typeof obj.items !== 'object') return base
 
   const version = Number(obj.version)
-  // 仅接受带完整自定义痕迹的 v2/v3；无 version 或旧官方默认 → 新默认
+  // ???????????? v2/v3?? version ?????? ? ???
   if (version !== 2 && version !== 3) return base
   if (version === 2 && isLegacyStockDefault(obj.items)) return base
 
@@ -109,13 +113,13 @@ export function normalizeControlLayout(raw: unknown): ControlLayout {
   return { version: 3, items }
 }
 
-/** 识别未改过的旧出厂坐标（含已删除的 place 键） */
+/** ????????????????? place ?? */
 function isLegacyStockDefault(items: Partial<Record<string, ControlItemLayout>>) {
   const p = items.place
   const c = items.crouch
   const b = items.break
   const j = items.jump
-  // v1 旧默认
+  // v1 ???
   if (
     p &&
     c &&
@@ -125,7 +129,7 @@ function isLegacyStockDefault(items: Partial<Record<string, ControlItemLayout>>)
   ) {
     return true
   }
-  // v2 早期默认簇（与 www 实测差距大）
+  // v2 ??????? www ??????
   if (
     j &&
     c &&
@@ -153,7 +157,7 @@ export function loadLayoutLocal(userId?: number | null): ControlLayout {
   try {
     const raw = localStorage.getItem(storageKey(userId))
     if (!raw) {
-      // 兼容读旧 v2 键，再写入 v3
+      // ???? v2 ????? v3
       const legacy =
         localStorage.getItem(
           userId && userId > 0 ? `sv_control_layout_v2_u${userId}` : 'sv_control_layout_v2_guest'

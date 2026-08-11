@@ -29,7 +29,18 @@ export interface NpcPolicy {
 
 export interface JoinResult {
   server: GameServer
-  player: { x: number; y: number; z: number; yaw: number; pitch: number }
+  player: {
+    x: number
+    y: number
+    z: number
+    yaw: number
+    pitch: number
+    /** 准备舱中心（组队同舱时对齐队长） */
+    cabinX?: number
+    cabinZ?: number
+    partySlot?: number
+    shareCabin?: boolean
+  }
   inventory?: InventoryCounts
   npcPolicy: NpcPolicy
 }
@@ -101,6 +112,6 @@ export function saveServerBlocks(serverId: number, blocks: ServerBlock[]) {
   return apiPost<ServerBlock[]>('/servers/blocks', { serverId, blocks })
 }
 
-export function saveServerInventory(serverId: number, inventory: InventoryCounts) {
-  return apiPost<InventoryCounts>('/servers/inventory', { serverId, inventory })
+export function saveServerInventory(serverId: number, inventory: InventoryCounts | Record<string, unknown>) {
+  return apiPost<InventoryCounts | Record<string, unknown>>('/servers/inventory', { serverId, inventory })
 }

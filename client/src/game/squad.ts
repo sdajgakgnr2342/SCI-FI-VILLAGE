@@ -17,6 +17,8 @@ export interface SquadMember {
   slot: number
   /** 同服在线（有位置同步） */
   online?: boolean
+  /** 已阵亡（死亡倒计时中） */
+  fallen?: boolean
 }
 
 export function squadColor(slot: number) {

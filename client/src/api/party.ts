@@ -55,7 +55,17 @@ export function leaveParty() {
 export function enterWithParty(serverId?: number) {
   return apiPost<{
     server: { id: number; name: string; seed: number }
-    player: { x: number; y: number; z: number; yaw: number; pitch: number }
+    player: {
+      x: number
+      y: number
+      z: number
+      yaw: number
+      pitch: number
+      cabinX?: number
+      cabinZ?: number
+      partySlot?: number
+      shareCabin?: boolean
+    }
     npcPolicy: unknown
     party: PartyInfo
   }>('/party/enter', serverId ? { serverId } : {})

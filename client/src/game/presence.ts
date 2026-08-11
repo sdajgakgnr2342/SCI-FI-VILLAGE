@@ -1,4 +1,12 @@
-export type PresenceAction = 'dig' | 'chop' | 'mine' | 'build' | 'clear' | string | null
+export type PresenceAction =
+  | 'dig'
+  | 'chop'
+  | 'mine'
+  | 'build'
+  | 'clear'
+  | 'attack'
+  | string
+  | null
 
 export interface PeerPresence {
   userId: number
@@ -11,8 +19,12 @@ export interface PeerPresence {
   pitch: number
   action?: PresenceAction
   crouching?: boolean
+  hp?: number
+  dead?: boolean
   ts?: number
 }
+
+export type CombatHandlerMsg = Record<string, unknown>
 
 type Handler = {
   onPeers?: (peers: PeerPresence[]) => void
@@ -47,6 +59,7 @@ type Handler = {
     }
     ts?: number
   }) => void
+  onCombat?: (msg: CombatHandlerMsg) => void
   onError?: (msg: string) => void
 }
 
@@ -64,6 +77,7 @@ export class PresenceClient {
   private lastX = 0
   private lastZ = 0
   private lastAction: PresenceAction = null
+  private lastDeploying = false
   private reconnectTimer: number | undefined
 
   connect(token: string, serverId: number, handlers: Handler) {
@@ -128,6 +142,16 @@ export class PresenceClient {
           }
           ts?: number
         })
+      } else if (
+        typeof msg.type === 'string' &&
+        (String(msg.type).startsWith('combat_') ||
+          msg.type === 'furniture_placed' ||
+          msg.type === 'furniture_cleared' ||
+          msg.type === 'shop_result')
+      ) {
+        this.handlers.onCombat?.(msg)
+      } else if (msg.type === 'auth_ok' && msg.combat) {
+        this.handlers.onCombat?.({ type: 'combat_auth', ...(msg.combat as object) })
       } else if (msg.type === 'error') {
         this.handlers.onError?.(String(msg.message || 'ws error'))
       }
@@ -141,6 +165,11 @@ export class PresenceClient {
     }
   }
 
+  private send(obj: Record<string, unknown>) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+    this.ws.send(JSON.stringify(obj))
+  }
+
   /**
    * 自适应上报：移动 ~10Hz，静止 ~2Hz，动作变化立即发
    */
@@ -152,39 +181,31 @@ export class PresenceClient {
     pitch: number
     action?: PresenceAction
     crouching?: boolean
+    /** 准备舱未投下：服务器不把该玩家当刷怪/索敌目标 */
+    deploying?: boolean
   }) {
     const now = performance.now()
     const dx = data.x - this.lastX
     const dz = data.z - this.lastZ
     const moved = dx * dx + dz * dz > 0.0004
     const actionChanged = (data.action || null) !== this.lastAction
-    const minInterval = actionChanged ? 50 : moved ? 100 : 450
+    const deploying = Boolean(data.deploying)
+    const deployingChanged = deploying !== this.lastDeploying
+    const minInterval = actionChanged || deployingChanged ? 50 : moved ? 100 : 450
     if (now - this.lastSend < minInterval) return
     this.lastSend = now
     this.lastX = data.x
     this.lastZ = data.z
     this.lastAction = data.action || null
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
-    this.ws.send(
-      JSON.stringify({
-        type: 'presence',
-        ...data,
-      })
-    )
+    this.lastDeploying = deploying
+    this.send({ type: 'presence', ...data, deploying })
   }
 
   sendBlocks(blocks: { x: number; y: number; z: number; blockId: string }[]) {
     if (!blocks.length) return
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
-    this.ws.send(
-      JSON.stringify({
-        type: 'blocks',
-        blocks,
-      })
-    )
+    this.send({ type: 'blocks', blocks })
   }
 
-  /** 小队标记：同服队友全图同步 */
   sendSquadMark(data: {
     clear?: boolean
     slot?: number
@@ -193,16 +214,9 @@ export class PresenceClient {
     z?: number
     label?: string
   }) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
-    this.ws.send(
-      JSON.stringify({
-        type: 'squad_mark',
-        ...data,
-      })
-    )
+    this.send({ type: 'squad_mark', ...data })
   }
 
-  /** 小队聊天 / 系统消息同步 */
   sendSquadChat(data: {
     channel: 'team' | 'system'
     kind?: 'chat' | 'mark' | 'wait'
@@ -217,13 +231,61 @@ export class PresenceClient {
       label?: string
     }
   }) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
-    this.ws.send(
-      JSON.stringify({
-        type: 'squad_chat',
-        ...data,
-      })
-    )
+    this.send({ type: 'squad_chat', ...data })
+  }
+
+  sendCombatAttack(data: {
+    x: number
+    y: number
+    z: number
+    dirX: number
+    dirZ: number
+    weaponId?: string
+    useAxe?: boolean
+  }) {
+    this.send({ type: 'combat_attack', ...data })
+  }
+
+  sendUseMedkit(kind: 'medkit_small' | 'medkit_large') {
+    this.send({ type: 'combat_use_medkit', kind })
+  }
+
+  sendClaimCrate(crateId: string) {
+    this.send({ type: 'combat_claim_crate', crateId })
+  }
+
+  sendEquipWeapon(weaponInstanceId: string) {
+    this.send({ type: 'combat_equip', weaponInstanceId })
+  }
+
+  sendClaimChest(chestId: string) {
+    this.send({ type: 'combat_claim_chest', chestId })
+  }
+
+  sendHarvestLoot(source: string) {
+    this.send({ type: 'combat_harvest_loot', source })
+  }
+
+  sendSyncBag(bag: Record<string, unknown>) {
+    this.send({ type: 'combat_sync_bag', bag })
+  }
+
+  sendShopBuy(shopItemId: string) {
+    this.send({ type: 'shop_buy', shopItemId })
+  }
+
+  sendShopSell(data: { kind: string; id: string; count?: number }) {
+    this.send({ type: 'shop_sell', ...data })
+  }
+
+  sendFurniturePlace(data: {
+    propId: string
+    x: number
+    y: number
+    z: number
+    yaw?: number
+  }) {
+    this.send({ type: 'furniture_place', ...data })
   }
 
   disconnect() {

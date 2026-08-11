@@ -31,6 +31,10 @@ interface NpcAgent {
   stuck: number
   fleeBuild: boolean
   steerSign: number
+  /** 脱出冷却：避免每帧传送/换向导致抖动 */
+  escapeCd: number
+  /** 绕障尝试节流 */
+  steerCd: number
 }
 
 function rand(min: number, max: number) {
@@ -135,11 +139,14 @@ export class NpcManager {
     // 优先稍远一点，减少贴树再选树边的目标
     for (let i = 0; i < tries; i++) {
       const ang = (i / tries) * Math.PI * 2 + Math.random() * 0.4
-      const d = rand(Math.min(1.2, radius * 0.35), radius)
+      const d = rand(Math.min(1.8, radius * 0.4), radius)
       const x = ox + Math.cos(ang) * d
       const z = oz + Math.sin(ang) * d
       if (!this.world.walkable(x, z)) continue
       if (this.world.nearBuild(x, z, 4)) continue
+      // 目标点周围也要空，避免又贴进石/树
+      if (!this.world.walkable(x + 0.45, z) || !this.world.walkable(x - 0.45, z)) continue
+      if (!this.world.walkable(x, z + 0.45) || !this.world.walkable(x, z - 0.45)) continue
       return new THREE.Vector3(x, this.world.standY(x, z), z)
     }
     return null
@@ -206,6 +213,8 @@ export class NpcManager {
       stuck: 0,
       fleeBuild: false,
       steerSign: Math.random() > 0.5 ? 1 : -1,
+      escapeCd: 0,
+      steerCd: 0,
     })
   }
 
@@ -358,14 +367,21 @@ export class NpcManager {
     return fallback
   }
 
-  /** 平滑走路：转向 + 绕障，贴平地，绝不爬石/跳跃 */
+  /** 平滑走路：转向 + 遇障冷静换路，避免左右试探抖动 */
   private walkToward(a: NpcAgent, dt: number) {
+    if (a.escapeCd > 0) a.escapeCd = Math.max(0, a.escapeCd - dt)
+    if (a.steerCd > 0) a.steerCd = Math.max(0, a.steerCd - dt)
+
     const pos = a.mesh.position
     pos.y = this.world.standY(pos.x, pos.z)
 
-    // 已站在不可走格（偶发嵌进树干）：立刻脱出
+    // 嵌进障碍：停步，冷却后再脱出一次（禁止每帧乱传）
     if (!this.world.walkable(pos.x, pos.z)) {
-      this.unstuckAgent(a)
+      a.moving = false
+      if (a.escapeCd <= 0) {
+        this.unstuckAgent(a)
+        a.escapeCd = 1.1
+      }
       return
     }
 
@@ -390,66 +406,85 @@ export class NpcManager {
     a.yaw += turn
     a.mesh.rotation.y = a.yaw
 
+    // 还在大幅转向：站住转，不挪步（减少贴障摩擦）
     if (Math.abs(dy) >= 0.7) {
       a.moving = false
-      // 目标方向被树挡住时仍累计 stuck，避免一直转圈不走
       const fx = -Math.sin(desiredYaw)
       const fz = -Math.cos(desiredYaw)
-      const lx = pos.x + fx * 0.55
-      const lz = pos.z + fz * 0.55
-      if (!this.world.walkable(lx, lz)) {
+      if (!this.world.walkable(pos.x + fx * 0.6, pos.z + fz * 0.6)) {
         a.stuck += dt
-        if (a.stuck > 0.45) this.unstuckAgent(a)
+        if (a.stuck > 0.3 && a.escapeCd <= 0) {
+          this.unstuckAgent(a)
+          a.escapeCd = 1.0
+        }
       }
       return
     }
 
     const step = Math.min(a.speed * dt, dist)
-    const moved = this.tryStep(a, step)
-    if (moved) {
+    if (this.tryStep(a, step)) {
       a.moving = true
-      a.stuck = Math.max(0, a.stuck - dt * 2)
+      a.stuck = 0
       return
     }
 
-    // 前方受阻：左右试探绕行（不跳）
-    a.stuck += dt
-    const sidestep = this.trySteerAround(a, step)
-    if (sidestep) {
-      a.moving = true
-      a.stuck = Math.max(0, a.stuck - dt)
-      return
-    }
-
+    // 前方受阻：先停住，节流后再侧绕；仍不行则干净换路
     a.moving = false
-    if (a.stuck > 0.45) this.unstuckAgent(a)
+    a.stuck += dt
+
+    if (a.steerCd <= 0) {
+      a.steerCd = 0.22
+      if (this.trySteerAround(a, step)) {
+        a.moving = true
+        a.stuck = Math.max(0, a.stuck - 0.2)
+        return
+      }
+      a.steerSign *= -1
+    }
+
+    if (a.stuck > 0.32 && a.escapeCd <= 0) {
+      this.unstuckAgent(a)
+      a.escapeCd = 1.0
+    }
   }
 
-  /** 卡树/灌木旁：换向、侧移脱出、重选目标 */
+  /** 卡树/石旁：一次侧移脱出 + 换开阔目标，不连续抖动 */
   private unstuckAgent(a: NpcAgent) {
     a.stuck = 0
+    a.moving = false
     a.steerSign *= -1
     const pos = a.mesh.position
 
-    const escapes: [number, number][] = [
-      [0.85, 0],
-      [-0.85, 0],
-      [0, 0.85],
-      [0, -0.85],
-      [0.7, 0.7],
-      [0.7, -0.7],
-      [-0.7, 0.7],
-      [-0.7, -0.7],
-      [1.4, 0],
-      [-1.4, 0],
-      [0, 1.4],
-      [0, -1.4],
-    ]
-    // 打乱，避免总朝同一方向挤
-    for (let i = escapes.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1))
-      ;[escapes[i], escapes[j]] = [escapes[j], escapes[i]]
+    // 优先从「当前朝向目标」的反方向 / 侧方拉开
+    const awayX = pos.x - a.target.x
+    const awayZ = pos.z - a.target.z
+    const awayLen = Math.hypot(awayX, awayZ)
+    const bx = awayLen > 1e-3 ? awayX / awayLen : -Math.sin(a.yaw)
+    const bz = awayLen > 1e-3 ? awayZ / awayLen : -Math.cos(a.yaw)
+    const px = -bz
+    const pz = bx
+
+    const escapes: [number, number][] = []
+    for (const dist of [2.4, 1.8, 1.3, 0.9]) {
+      escapes.push([bx * dist, bz * dist])
+      escapes.push([px * dist, pz * dist])
+      escapes.push([-px * dist, -pz * dist])
+      escapes.push([-bx * dist * 0.7, -bz * dist * 0.7])
     }
+    for (const [dx, dz] of [
+      [2.0, 0],
+      [-2.0, 0],
+      [0, 2.0],
+      [0, -2.0],
+      [1.5, 1.5],
+      [1.5, -1.5],
+      [-1.5, 1.5],
+      [-1.5, -1.5],
+    ] as const) {
+      escapes.push([dx, dz])
+    }
+
+    let escaped = false
     for (const [dx, dz] of escapes) {
       const nx = pos.x + dx
       const nz = pos.z + dz
@@ -460,15 +495,26 @@ export class NpcManager {
       pos.y = this.world.standY(nx, nz)
       a.yaw = Math.atan2(-dx, -dz)
       a.mesh.rotation.y = a.yaw
+      escaped = true
       break
     }
 
+    // 新目标选开阔处，避免立刻又撞同一棵树
+    const originX = pos.x
+    const originZ = pos.z
     if (a.fleeBuild || a.phase === 'depart' || a.phase === 'exit') {
       a.target = a.fleeBuild ? this.pickAwayFromBuilds(a) : this.pickBlindSpotTarget(a, true)
     } else {
-      const next = this.findWalkableNear(pos.x, pos.z, 8)
+      const next =
+        this.findWalkableNear(originX, originZ, 12) ||
+        this.findWalkableNear(originX + bx * 6, originZ + bz * 6, 8)
       if (next) a.target.copy(next)
       else a.target = this.pickBlindSpotTarget(a, true)
+    }
+
+    // 若仍卡在原地，至少把目标甩远，下一轮再走
+    if (!escaped) {
+      a.target = this.pickBlindSpotTarget(a, true)
     }
   }
 
@@ -477,11 +523,11 @@ export class NpcManager {
     const fz = -Math.cos(a.yaw)
     const nx = a.mesh.position.x + fx * step
     const nz = a.mesh.position.z + fz * step
-    // 前瞻半步，避免贴进障碍
-    const lx = a.mesh.position.x + fx * Math.max(step, 0.4)
-    const lz = a.mesh.position.z + fz * Math.max(step, 0.4)
+    // 前瞻更远一点，提前认树/大石，少贴脸摩擦
+    const look = Math.max(step * 1.5, 0.55)
+    const lx = a.mesh.position.x + fx * look
+    const lz = a.mesh.position.z + fz * look
     if (!this.world.walkable(nx, nz) || !this.world.walkable(lx, lz)) return false
-    // 逃离房屋时不要朝建筑更近的方向硬闯
     if (
       a.fleeBuild &&
       this.world.nearBuild(nx, nz, 3) &&
@@ -496,36 +542,23 @@ export class NpcManager {
   }
 
   private trySteerAround(a: NpcAgent, step: number): boolean {
-    // 更大角度侧绕，必要时倒退离开树旁
     const s = a.steerSign
-    const offsets = [
-      0.55 * s,
-      0.95 * s,
-      1.35 * s,
-      1.85 * s,
-      -0.55 * s,
-      -0.95 * s,
-      -1.35 * s,
-      -1.85 * s,
-      Math.PI * 0.85,
-      -Math.PI * 0.85,
-    ]
+    const offsets = [0.7 * s, 1.2 * s, 1.7 * s, -0.7 * s, -1.2 * s, Math.PI * 0.9]
     for (const off of offsets) {
       const yaw = a.yaw + off
       const fx = -Math.sin(yaw)
       const fz = -Math.cos(yaw)
-      const stride = Math.abs(off) > 2 ? step * 0.9 : step
+      const stride = Math.max(step, 0.28)
       const nx = a.mesh.position.x + fx * stride
       const nz = a.mesh.position.z + fz * stride
-      const lx = a.mesh.position.x + fx * 0.5
-      const lz = a.mesh.position.z + fz * 0.5
+      const lx = a.mesh.position.x + fx * 0.55
+      const lz = a.mesh.position.z + fz * 0.55
       if (!this.world.walkable(nx, nz) || !this.world.walkable(lx, lz)) continue
       a.yaw = yaw
       a.mesh.rotation.y = a.yaw
       a.mesh.position.x = nx
       a.mesh.position.z = nz
       a.mesh.position.y = this.world.standY(nx, nz)
-      a.stuck = 0
       return true
     }
     return false
